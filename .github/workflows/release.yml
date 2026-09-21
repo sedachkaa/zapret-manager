@@ -1,0 +1,58 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.11.1
+
+      - name: Verify version matches tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $py  = (Select-String -Path app/version.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ($tag -ne $py) {
+            Write-Host "::error::Тег ($tag) не совпадает с app/version.py ($py)"
+            exit 1
+          }
+          Write-Host "Версия $py совпадает с тегом."
+
+      - name: Build with PyInstaller
+        run: pyinstaller build.spec
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          # zip содержит СОДЕРЖИМОЕ dist/ZapretManager (exe и _internal на верхнем уровне)
+          Compress-Archive -Path dist/ZapretManager/* -DestinationPath "dist/ZapretManager-$tag.zip"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ZapretManager-${{ github.ref_name }}.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false

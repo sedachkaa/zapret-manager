@@ -24,3 +24,4 @@ config.local.json
 logs/
 *.log
 config.json
+autostart.bat
