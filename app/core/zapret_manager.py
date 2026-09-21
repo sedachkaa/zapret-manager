@@ -11,6 +11,9 @@ Standalone запускает winws.exe с аргументами из:
     start_smart()    — сам решает, что делать (служба/установка/запуск);
     stop_smart()     — останавливает то, что работает;
     restart_smart()  — стоп + старт.
+
+Все системные вызовы (sc, netsh, tasklist) обрабатывают как
+английскую, так и русскую локали Windows.
 """
 
 from __future__ import annotations
@@ -114,8 +117,7 @@ def _tasklist_pid(image_name: str) -> Optional[int]:
 
 def _list_bypass_processes() -> list[tuple[str, int]]:
     """
-    Возвращает список (имя_процесса, PID) для известных процессов-обходчиков:
-    winws.exe, ZapretManager.exe, GoodbyeDPI.exe, tg-ws-proxy и подобные.
+    Возвращает список (имя_процесса, PID) для известных процессов-обходчиков.
     """
     targets = {
         "winws.exe", "zapretmanager.exe",
@@ -145,8 +147,8 @@ def _list_bypass_processes() -> list[tuple[str, int]]:
 def _sc_query_status(service: str) -> Optional[str]:
     """
     Возвращает 'RUNNING', 'STOPPED', 'STOP_PENDING', 'START_PENDING' и т.п.,
-    либо None. Поддерживает как английскую (STATE), так и русскую (Состояние)
-    локали Windows, плюс несколько других распространённых языков.
+    либо None. Поддерживает английскую (STATE) и русскую (Состояние) локали
+    Windows, плюс несколько других распространённых языков.
     """
     rc, out, _ = _run(["sc", "query", service], timeout=5)
     if rc != 0:
@@ -172,6 +174,20 @@ def _sc_query_status(service: str) -> Optional[str]:
         if state in upper:
             return state
     return None
+
+
+def _tcp_timestamps_enabled() -> bool:
+    """
+    Проверяет, включены ли TCP timestamps.
+    На англ. Windows строка 'timestamps', на русской — 'Отметки времени RFC 1323'.
+    """
+    rc, out, _ = _run(["netsh", "interface", "tcp", "show", "global"], timeout=10)
+    if rc != 0:
+        return False
+    low = out.lower()
+    has_name = ("timestamps" in low) or ("отметки времени" in low) or ("rfc 1323" in low)
+    has_value = "enabled" in low or "включ" in low
+    return has_name and has_value
 
 
 def _http_get(url: str, *, timeout: int = 15) -> Optional[str]:
@@ -403,7 +419,7 @@ class ZapretManager:
         else:
             lines.append("winws.exe: не запущен ✗")
 
-        # Драйвер WinDivert (реально загруженный kernel-driver)
+        # Драйвер WinDivert (kernel-driver)
         rc, out, _ = _run(["driverquery", "/FO", "CSV", "/NH"], timeout=10)
         if rc == 0:
             for line in out.splitlines():
@@ -420,8 +436,7 @@ class ZapretManager:
             joined = "; ".join(f"{n} (PID {pid})" for n, pid in procs)
             lines.append(f"Процессы-обходчики: {joined}")
 
-        rc, out, _ = _run(["netsh", "interface", "tcp", "show", "global"], timeout=10)
-        if "timestamps" in out.lower() and "enabled" in out.lower():
+        if _tcp_timestamps_enabled():
             lines.append("TCP timestamps: включены ✓")
         else:
             lines.append("TCP timestamps: выключены")
@@ -436,8 +451,7 @@ class ZapretManager:
         return ZapretResult("status", True, "статус получен", "\n".join(lines))
 
     def enable_tcp_timestamps(self) -> ZapretResult:
-        rc, out, _ = _run(["netsh", "interface", "tcp", "show", "global"], timeout=10)
-        if "timestamps" in out.lower() and "enabled" in out.lower():
+        if _tcp_timestamps_enabled():
             return ZapretResult("tcp", True, "уже включены")
         rc, out, err = _run(["netsh", "interface", "tcp", "set", "global", "timestamps=enabled"], timeout=15)
         if rc == 0:
@@ -626,8 +640,7 @@ class ZapretManager:
 
         rc, out, err = _run(["sc", "start", SERVICE_NAME], timeout=25)
 
-        # Ждём, пока служба реально перейдёт в RUNNING. На медленных машинах
-        # и при первой установке это может занять до 5–10 секунд.
+        # Ждём RUNNING до 10 сек
         deadline = time.time() + 10.0
         state: Optional[str] = None
         while time.time() < deadline:
@@ -637,8 +650,7 @@ class ZapretManager:
             time.sleep(0.5)
 
         if state != "RUNNING":
-            # Служба НЕ удаляется! Возможно, она ещё стартует или запустится
-            # через несколько секунд. Пользователь сможет проверить вручную.
+            # Служба НЕ удаляется — возможно, она ещё стартует.
             _, query_out, _ = _run(["sc", "query", SERVICE_NAME], timeout=5)
             return ZapretResult(
                 "install", False,
@@ -995,8 +1007,7 @@ class ZapretManager:
             lines.append(f"✗ Base Filtering Engine: {bfe_state or 'недоступен'}")
             lines.append("   Включите службу BFE: services.msc → Base Filtering Engine → Запустить")
 
-        rc, out, _ = _run(["netsh", "interface", "tcp", "show", "global"], timeout=10)
-        if "timestamps" in out.lower() and "enabled" in out.lower():
+        if _tcp_timestamps_enabled():
             lines.append("✓ TCP timestamps включены")
         else:
             lines.append("? TCP timestamps выключены — можно включить")
@@ -1114,5 +1125,5 @@ if __name__ == "__main__":
     print("PID winws        :", z.get_winws_pid())
     print("Админ            :", is_admin())
     print("Локальная версия :", z.get_local_version())
-    print()
     print("BFE status       :", _sc_query_status("BFE"))
+    print("TCP timestamps   :", "включены" if _tcp_timestamps_enabled() else "выключены")
