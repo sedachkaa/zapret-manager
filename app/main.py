@@ -1,13 +1,26 @@
-import customtkinter as ctk
+"""
+Точка входа приложения Zapret Manager.
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+Запуск из исходников:
+    python -m app.main
 
-app = ctk.CTk()
-app.title("Zapret Manager — test")
-app.geometry("800x500")
+При сборке PyInstaller этот файл становится точкой входа exe.
+"""
 
-label = ctk.CTkLabel(app, text="Окружение работает ✅", font=("Arial", 20))
-label.pack(pady=40)
+from __future__ import annotations
 
-app.mainloop()
+import sys
+
+from app.core.config import Config
+from app.gui.main_window import MainWindow
+
+
+def main() -> int:
+    cfg = Config()
+    app = MainWindow(cfg)
+    app.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
