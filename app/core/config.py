@@ -57,6 +57,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "github_repo": "sedachkaa/zapret-manager",
     "auto_check_updates_on_start": True,
     "theme": "dark",
+    # Последняя выбранная пользователем стратегия zapret.
+    # Подставляется в выпадающий список при старте.
+    "last_strategy": "",
 }
 
 
@@ -150,16 +153,22 @@ class Config:
         """Полный путь к TgWsProxy_windows.exe."""
         return PROJECT_ROOT / str(self._data.get("tgproxy_path", ""))
 
+    @property
+    def last_strategy(self) -> str:
+        """Последняя выбранная стратегия zapret (пустая строка, если не задана)."""
+        return str(self._data.get("last_strategy", "") or "")
+
 
 # --- Быстрый тест при прямом запуске ------------------------------------
 
 if __name__ == "__main__":
     cfg = Config()
-    print("PROJECT_ROOT:", PROJECT_ROOT)
-    print("CONFIG_PATH :", cfg.path)
-    print("Repo        :", cfg.github_repo)
-    print("Zapret      :", cfg.zapret_path)
-    print("TG Proxy    :", cfg.tgproxy_path)
-    print("Исключения  :")
+    print("PROJECT_ROOT  :", PROJECT_ROOT)
+    print("CONFIG_PATH   :", cfg.path)
+    print("Repo          :", cfg.github_repo)
+    print("Zapret        :", cfg.zapret_path)
+    print("TG Proxy      :", cfg.tgproxy_path)
+    print("Last strategy :", cfg.last_strategy or "(не задана)")
+    print("Исключения    :")
     for item in cfg.exclude_from_update:
         print("   -", item)

@@ -14,7 +14,7 @@ from typing import Callable
 
 import customtkinter as ctk
 
-from app.core import updater
+from app.core import autostart, updater
 from app.core.config import PROJECT_ROOT, Config
 from app.core.tgproxy_manager import TgProxyManager
 from app.core.zapret_manager import ZapretManager
@@ -199,11 +199,23 @@ class MainWindow(ctk.CTk):
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.grid(row=0, column=0, sticky="ew")
         ctk.CTkLabel(row, text="Стратегия:").grid(row=0, column=0, padx=(4, 6), pady=4, sticky="w")
+
+        # Подтягиваем сохранённую стратегию
         strategies = [p.stem for p in self.zapret.list_strategies()]
-        default_strategy = strategies[0] if strategies else "—"
+        last = self.cfg.last_strategy
+        if last and last in strategies:
+            default_strategy = last
+        else:
+            default_strategy = strategies[0] if strategies else "—"
+
         self.strategy_var = ctk.StringVar(value=default_strategy)
         self.strategy_menu = ctk.CTkOptionMenu(
-            row, values=strategies or ["—"], variable=self.strategy_var, width=280)
+            row,
+            values=strategies or ["—"],
+            variable=self.strategy_var,
+            width=280,
+            command=self._on_strategy_changed,
+        )
         self.strategy_menu.grid(row=0, column=1, padx=4, pady=4, sticky="w")
 
         # Умные кнопки
@@ -302,6 +314,16 @@ class MainWindow(ctk.CTk):
         self._refresh_zapret_toggles()
         self._refresh_fake_menu()
 
+    # ---- обработчик смены стратегии ----
+
+    def _on_strategy_changed(self, value: str) -> None:
+        """Сохраняем последнюю выбранную стратегию в config.json."""
+        if not value or value == "—":
+            return
+        self.cfg.set("last_strategy", value)
+        self.cfg.save()
+        self.set_status(f"Стратегия сохранена: {value}")
+
     # ---- обновление UI Zapret ----
 
     def _refresh_zapret_status(self) -> None:
@@ -329,8 +351,6 @@ class MainWindow(ctk.CTk):
         self.zapret_indicator.configure(text_color=color)
         self.zapret_version_label.configure(text=f"v{self.zapret.get_local_version()}")
 
-        # Стратегию показываем только когда что-то реально работает,
-        # иначе реестр отдаёт имя последней установленной службы.
         strat = self.zapret.get_active_strategy_name()
         if strat and self.zapret.is_active():
             self.zapret_strategy_label.configure(text=f"Активная стратегия: {strat}")
@@ -835,6 +855,7 @@ class MainWindow(ctk.CTk):
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
 
+        # --- Исключения при обновлении ---
         info_card, info_body = self._make_card(tab, title="⚙  Исключения при обновлении")
         info_card.grid(row=0, column=0, padx=8, pady=(8, 6), sticky="ew")
         ctk.CTkLabel(
@@ -851,8 +872,32 @@ class MainWindow(ctk.CTk):
         self.settings_excludes.grid(row=1, column=0, padx=8, pady=6, sticky="nsew")
         self.settings_excludes.insert("1.0", "\n".join(self.cfg.exclude_from_update))
 
+        # --- Автозапуск с Windows ---
+        auto_card, auto_body = self._make_card(tab, title="🚀  Автозапуск с Windows")
+        auto_card.grid(row=2, column=0, padx=8, pady=6, sticky="ew")
+
+        self.autostart_var = ctk.BooleanVar(value=autostart.is_enabled())
+        self.autostart_checkbox = ctk.CTkCheckBox(
+            auto_body,
+            text="Запускать Zapret Manager при входе в Windows",
+            variable=self.autostart_var,
+            command=self._on_toggle_autostart,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.autostart_checkbox.grid(row=0, column=0, padx=4, pady=(0, 6), sticky="w")
+
+        ctk.CTkLabel(
+            auto_body,
+            text=("Приложение будет запускаться автоматически при входе в систему "
+                  "(без окна консоли).\nНастройка хранится в реестре "
+                  "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run."),
+            anchor="w", justify="left", wraplength=940,
+            text_color=("gray45", "gray60"), font=ctk.CTkFont(size=11),
+        ).grid(row=1, column=0, padx=4, pady=0, sticky="w")
+
+        # --- Действия ---
         actions_card, actions = self._make_card(tab, title="Действия")
-        actions_card.grid(row=2, column=0, padx=8, pady=(0, 8), sticky="ew")
+        actions_card.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="ew")
 
         row = ctk.CTkFrame(actions, fg_color="transparent")
         row.grid(row=0, column=0, sticky="ew")
@@ -875,6 +920,32 @@ class MainWindow(ctk.CTk):
         ctk.CTkButton(row2, text="📄 Открыть config.json",
                       command=self._on_show_config, width=200, height=32).grid(
             row=0, column=2, padx=4, pady=4, sticky="w")
+
+    # ---- Автозапуск ----
+
+    def _on_toggle_autostart(self) -> None:
+        """Включает/выключает автозапуск при старте Windows."""
+        desired = self.autostart_var.get()
+        if desired:
+            ok = autostart.enable()
+            if ok:
+                self.log("updates", "→ Автозапуск включён")
+                self.set_status("Автозапуск включён")
+            else:
+                self.autostart_var.set(False)
+                self.log("updates", "✗ Не удалось включить автозапуск")
+                self.set_status("Не удалось включить автозапуск")
+        else:
+            ok = autostart.disable()
+            if ok:
+                self.log("updates", "→ Автозапуск выключен")
+                self.set_status("Автозапуск выключен")
+            else:
+                self.autostart_var.set(True)
+                self.log("updates", "✗ Не удалось выключить автозапуск")
+                self.set_status("Не удалось выключить автозапуск")
+
+    # ---- Работа с исключениями ----
 
     def _get_exclude_lines(self) -> list[str]:
         raw = self.settings_excludes.get("1.0", "end")
