@@ -9,7 +9,7 @@ Standalone запускает winws.exe с аргументами из:
 
 Умные кнопки:
     start_smart()    — сам решает, что делать (служба/установка/запуск);
-    stop_smart()     — агрессивно останавливает всё, что может держать обход;
+    stop_smart()     — останавливает то, что работает;
     restart_smart()  — стоп + старт.
 """
 
@@ -40,6 +40,8 @@ USER_AGENT = "zapret-manager/1.0"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
+# --- Результат операции --------------------------------------------------
+
 @dataclass
 class ZapretResult:
     action: str
@@ -54,6 +56,8 @@ class ZapretResult:
             s += f": {self.message}"
         return s
 
+
+# --- Утилиты -------------------------------------------------------------
 
 def is_admin() -> bool:
     try:
@@ -108,20 +112,66 @@ def _tasklist_pid(image_name: str) -> Optional[int]:
     return None
 
 
+def _list_bypass_processes() -> list[tuple[str, int]]:
+    """
+    Возвращает список (имя_процесса, PID) для известных процессов-обходчиков:
+    winws.exe, ZapretManager.exe, GoodbyeDPI.exe, tg-ws-proxy и подобные.
+    """
+    targets = {
+        "winws.exe", "zapretmanager.exe",
+        "goodbyedpi.exe", "goodbye_dpi.exe",
+        "tgwsproxy_windows.exe",
+    }
+    result: list[tuple[str, int]] = []
+    try:
+        rc, out, _ = _run(["tasklist", "/FO", "CSV", "/NH"], timeout=10)
+        if rc != 0:
+            return result
+        for line in out.splitlines():
+            parts = [p.strip('"') for p in line.split('","')]
+            if len(parts) < 2:
+                continue
+            name = parts[0]
+            if name.lower() in targets:
+                try:
+                    result.append((name, int(parts[1])))
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return result
+
+
 def _sc_query_status(service: str) -> Optional[str]:
+    """
+    Возвращает 'RUNNING', 'STOPPED', 'STOP_PENDING', 'START_PENDING' и т.п.,
+    либо None. Поддерживает как английскую (STATE), так и русскую (Состояние)
+    локали Windows, плюс несколько других распространённых языков.
+    """
     rc, out, _ = _run(["sc", "query", service], timeout=5)
     if rc != 0:
         return None
-    m = re.search(r"STATE\s*:\s*\d+\s+(\w+)", out)
-    return m.group(1) if m else None
 
+    patterns = [
+        r"STATE\s*:\s*\d+\s+(\w+)",
+        r"Состояние\s*:\s*\d+\s+(\w+)",
+        r"ESTADO\s*:\s*\d+\s+(\w+)",
+        r"STATUS\s*:\s*\d+\s+(\w+)",
+        r"ETAT\s*:\s*\d+\s+(\w+)",
+        r"ZUSTAND\s*:\s*\d+\s+(\w+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, out, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
 
-def _sc_query_exit_code(service: str) -> Optional[int]:
-    rc, out, _ = _run(["sc", "query", service], timeout=5)
-    if rc != 0:
-        return None
-    m = re.search(r"WIN32_EXIT_CODE\s*:\s*(\d+)", out)
-    return int(m.group(1)) if m else None
+    # Фолбэк — ищем ключевые слова состояний по всему выводу
+    upper = out.upper()
+    for state in ("RUNNING", "STOPPED", "START_PENDING", "STOP_PENDING",
+                  "PAUSED", "PAUSE_PENDING", "CONTINUE_PENDING"):
+        if state in upper:
+            return state
+    return None
 
 
 def _http_get(url: str, *, timeout: int = 15) -> Optional[str]:
@@ -146,30 +196,6 @@ def _http_download(url: str, dest: Path, *, timeout: int = 30) -> bool:
         return False
 
 
-def _tokenize_args(s: str) -> list[str]:
-    """
-    Правильный парсер аргументов Windows-командной строки.
-    Убирает кавычки где угодно (в т.ч. внутри токена), собирает соседние
-    фрагменты без пробела в один аргумент.
-    """
-    result: list[str] = []
-    cur: list[str] = []
-    in_quote = False
-    for ch in s:
-        if ch == '"':
-            in_quote = not in_quote
-            continue
-        if ch.isspace() and not in_quote:
-            if cur:
-                result.append("".join(cur))
-                cur = []
-            continue
-        cur.append(ch)
-    if cur:
-        result.append("".join(cur))
-    return result
-
-
 def _parse_imagepath(image_path: str) -> tuple[str, list[str]]:
     s = image_path.strip()
     if s.startswith('"'):
@@ -184,8 +210,17 @@ def _parse_imagepath(image_path: str) -> tuple[str, list[str]]:
             return s, []
         exe = s[:sp]
         rest = s[sp + 1:].strip()
-    return exe, _tokenize_args(rest)
+    tokens = re.findall(r'"[^"]*"|\S+', rest)
+    args = [t.strip('"') for t in tokens if t.strip()]
+    return exe, args
 
+
+def _tokenize_args(s: str) -> list[str]:
+    tokens = re.findall(r'"[^"]*"|\S+', s)
+    return [t.strip('"') for t in tokens if t.strip() and t != '"']
+
+
+# --- Менеджер ------------------------------------------------------------
 
 class ZapretManager:
     def __init__(self, cfg: Config) -> None:
@@ -289,107 +324,70 @@ class ZapretManager:
     #  Умные кнопки
     # ================================================================
 
-    def _wait_until_stable(self, *, timeout: float = 20.0,
-                           stable_for: float = 2.0) -> bool:
-        """
-        Ждёт, пока служба zapret продержится в состоянии RUNNING
-        минимум `stable_for` секунд подряд. Защищает от ложного «успеха»,
-        когда служба мигает RUNNING → STOPPED из-за падения winws.exe.
-        """
-        deadline = time.time() + timeout
-        run_started: float | None = None
-        while time.time() < deadline:
-            if self.is_service_running():
-                if run_started is None:
-                    run_started = time.time()
-                elif time.time() - run_started >= stable_for:
-                    return True
-            else:
-                run_started = None
-            time.sleep(0.3)
-        return False
-
     def start_smart(self, strategy_bat: Path) -> ZapretResult:
-        """
-        Умный запуск:
-        - служба стабильно работает → уже запущено;
-        - служба установлена, стратегия та же → sc start; если не стабилизируется,
-          принудительно переустанавливаем;
-        - служба установлена с другой стратегией → переустановка;
-        - службы нет → установка.
-        """
         if not is_admin():
             return ZapretResult("start", False, "нужны права администратора")
         if not strategy_bat.exists():
             return ZapretResult("start", False, f"стратегия не найдена: {strategy_bat}")
 
-        # 1. Служба реально работает
-        if self.is_service_running() and self.is_winws_running():
+        if self.is_service_running():
             return ZapretResult(
                 "start", True,
                 f"служба zapret уже запущена (стратегия: {self.get_active_strategy_name() or '?'})",
             )
 
-        # 2. Служба установлена с той же стратегией — пробуем быстрый sc start
         if self.is_service_installed():
             current_strat = self.get_active_strategy_name()
             if current_strat == strategy_bat.stem:
-                print(f"[zapret] start_smart: служба с нужной стратегией, пробую sc start")
+                print(f"[zapret] start_smart: служба с нужной стратегией, sc start")
                 _run(["sc", "start", SERVICE_NAME], timeout=25)
-                if self._wait_until_stable(timeout=20.0, stable_for=2.0):
-                    return ZapretResult(
-                        "start", True,
-                        f"служба zapret запущена (стратегия: {current_strat})",
-                    )
-                print("[zapret] start_smart: sc start не дал стабильного результата, переустанавливаю службу")
-                return self.install_service(strategy_bat)
 
-            # Стратегия другая — переустановка
-            print(f"[zapret] start_smart: стратегия изменилась ({current_strat} → {strategy_bat.stem}), переустанавливаю")
+                # Ждём RUNNING до 10 сек
+                deadline = time.time() + 10.0
+                state = None
+                while time.time() < deadline:
+                    state = _sc_query_status(SERVICE_NAME)
+                    if state == "RUNNING":
+                        break
+                    time.sleep(0.5)
+
+                if state == "RUNNING":
+                    return ZapretResult("start", True,
+                                        f"служба zapret запущена (стратегия: {current_strat})")
+                return ZapretResult(
+                    "start", False,
+                    f"служба не перешла в RUNNING за 10 сек (текущее: {state})",
+                    "Нажмите 'Check Status' через 10 секунд.",
+                )
+
+            print(f"[zapret] start_smart: стратегия изменилась ({current_strat} → {strategy_bat.stem})")
             return self.install_service(strategy_bat)
 
-        # 3. Службы нет — установить
-        print(f"[zapret] start_smart: служба не установлена, устанавливаю {strategy_bat.stem}")
+        print(f"[zapret] start_smart: служба не установлена, ставлю {strategy_bat.stem}")
         return self.install_service(strategy_bat)
 
     def stop_smart(self) -> ZapretResult:
-        """
-        Умная остановка (агрессивная, без early-return):
-        - наш standalone → terminate;
-        - служба → net stop + добить winws.exe + сбросить стратегию из реестра;
-        - любые внешние winws.exe → taskkill /T /F;
-        - драйвер WinDivert → попытка выгрузить.
-        """
-        lines: list[str] = []
-
         if self.is_our_process():
-            r = self.stop_standalone()
-            lines.append(r.message)
+            return self.stop_standalone()
 
-        if self.is_service_running() or _sc_query_status(SERVICE_NAME) is not None:
-            r = self._stop_service_only()
-            lines.append(r.message)
+        if self.is_service_running():
+            return self._stop_service_only()
 
-        killed = self._kill_all_winws()
-        if killed:
-            lines.append(f"убито: {', '.join(killed)}")
+        if _tasklist_has("winws.exe"):
+            _run(["taskkill", "/IM", "winws.exe", "/F"], timeout=10)
+            self._proc = None
+            self._strategy_name = ""
+            return ZapretResult("stop", True, "внешний winws.exe остановлен")
 
-        drv = self._unload_windivert()
-        if drv:
-            lines.append("; ".join(drv))
-
-        if not lines:
-            return ZapretResult("stop", True, "не был запущен")
-        return ZapretResult("stop", True, "; ".join(lines))
+        return ZapretResult("stop", True, "не был запущен")
 
     def restart_smart(self, strategy_bat: Path) -> ZapretResult:
-        """Стоп + старт."""
         self.stop_smart()
         time.sleep(0.8)
         return self.start_smart(strategy_bat)
 
     # ================================================================
-    #  Служба — статус и управление
+    #  Служба — статус
     # ================================================================
 
     def get_service_status(self) -> ZapretResult:
@@ -399,46 +397,38 @@ class ZapretManager:
         lines.append(f"Служба {SERVICE_NAME}: {svc or 'не установлена'}")
         lines.append(f"Служба WinDivert: {wd or 'не найдена'}")
 
-        if svc == "STOPPED":
-            code = _sc_query_exit_code(SERVICE_NAME)
-            if code == 1067:
-                lines.append("⚠ Последний exit code службы: 1067 (PROCESS_ABORTED) "
-                             "— winws.exe упал при старте")
-            elif code and code != 0:
-                lines.append(f"⚠ Последний exit code службы: {code}")
-
         if self.is_winws_running():
             pid = self.get_winws_pid()
             lines.append(f"winws.exe: ЗАПУЩЕН (PID {pid}) ✓")
         else:
             lines.append("winws.exe: не запущен ✗")
 
-        if svc == "RUNNING":
-            strat = self.get_active_strategy_name()
-            if strat:
-                lines.append(f"Стратегия: {strat}")
-
-        rc, out, _ = _run(["driverquery", "/FO", "CSV", "/NH"], timeout=15)
+        # Драйвер WinDivert (реально загруженный kernel-driver)
+        rc, out, _ = _run(["driverquery", "/FO", "CSV", "/NH"], timeout=10)
         if rc == 0:
-            wd_drv = [l for l in out.splitlines() if "windivert" in l.lower()]
-            if wd_drv:
-                lines.append(f"Драйвер WinDivert загружен: {wd_drv[0].strip()}")
-            else:
-                lines.append("Драйвер WinDivert: не загружен ✓")
-        else:
-            lines.append("driverquery недоступен")
+            for line in out.splitlines():
+                parts = [p.strip('"') for p in line.split('","')]
+                if parts and parts[0].lower().startswith("windivert"):
+                    name = parts[0]
+                    date = parts[-1] if len(parts) > 2 else "?"
+                    lines.append(f'Драйвер WinDivert загружен: "{name}","{name}","Kernel ","{date}"')
+                    break
 
-        suspects = self._list_bypass_processes()
-        if suspects:
-            lines.append("Процессы-обходчики: " + "; ".join(suspects))
-        else:
-            lines.append("Процессы-обходчики: не найдены ✓")
+        # Процессы-обходчики
+        procs = _list_bypass_processes()
+        if procs:
+            joined = "; ".join(f"{n} (PID {pid})" for n, pid in procs)
+            lines.append(f"Процессы-обходчики: {joined}")
 
         rc, out, _ = _run(["netsh", "interface", "tcp", "show", "global"], timeout=10)
         if "timestamps" in out.lower() and "enabled" in out.lower():
             lines.append("TCP timestamps: включены ✓")
         else:
             lines.append("TCP timestamps: выключены")
+
+        strat = self.get_active_strategy_name()
+        if strat:
+            lines.append(f"Стратегия: {strat}")
 
         if not list(self.bin_dir.glob("*.sys")):
             lines.append("WinDivert64.sys: НЕ найден ✗")
@@ -454,6 +444,8 @@ class ZapretManager:
             return ZapretResult("tcp", True, "включены")
         return ZapretResult("tcp", False, "не удалось включить", err)
 
+    # ---- Парсинг стратегий -------------------------------------------
+
     def list_strategies(self) -> list[Path]:
         if not self.zapret_dir.exists():
             return []
@@ -466,8 +458,6 @@ class ZapretManager:
             return [int(x) if x.isdigit() else x.lower() for x in re.split(r"(\d+)", p.name)]
 
         return sorted(bats, key=sort_key)
-
-    # ---- парсинг bat --------------------------------------------------
 
     def _game_filter_args(self) -> dict[str, str]:
         mode = self.get_game_filter_status()
@@ -558,14 +548,10 @@ class ZapretManager:
 
             tokens = _tokenize_args(rest)
             if tokens:
-                skip = {"1>nul", "2>nul", "1>NUL", "2>NUL", ">nul", ">NUL",
-                        "&", "&&", "||", "|", ">", "1>", "2>"}
-                tokens = [t for t in tokens if t not in skip]
-                if tokens:
-                    return tokens
+                return tokens
         return None
 
-    # ---- ImagePath из реестра -----------------------------------------
+    # ---- ImagePath из реестра ----------------------------------------
 
     def _get_service_image_path(self) -> Optional[str]:
         rc, out, _ = _run([
@@ -587,7 +573,7 @@ class ZapretManager:
             print(f"[zapret] ImagePath exe не winws.exe: {exe}")
         return args or None
 
-    # ---- install / remove ---------------------------------------------
+    # ---- Install / Remove --------------------------------------------
 
     def install_service(self, strategy_bat: Path) -> ZapretResult:
         if not is_admin():
@@ -607,10 +593,9 @@ class ZapretManager:
 
         print(f"[zapret] ImagePath = {image_path}")
 
-        # Полная зачистка перед установкой
         _run(["net", "stop", SERVICE_NAME], timeout=20)
         _run(["sc", "delete", SERVICE_NAME], timeout=15)
-        _run(["taskkill", "/F", "/T", "/IM", "winws.exe"], timeout=10)
+        _run(["taskkill", "/IM", "winws.exe", "/F"], timeout=10)
         time.sleep(0.5)
 
         rc, out, err = _run(
@@ -639,22 +624,34 @@ class ZapretManager:
             "/d", strategy_bat.stem, "/f",
         ], timeout=10)
 
-        _run(["sc", "start", SERVICE_NAME], timeout=25)
+        rc, out, err = _run(["sc", "start", SERVICE_NAME], timeout=25)
 
-        # Ждём СТАБИЛЬНОГО RUNNING (≥2 сек подряд), иначе winws мог упасть
-        if self._wait_until_stable(timeout=20.0, stable_for=2.0):
-            return ZapretResult("install", True,
-                                f"служба установлена со стратегией {strategy_bat.stem}")
+        # Ждём, пока служба реально перейдёт в RUNNING. На медленных машинах
+        # и при первой установке это может занять до 5–10 секунд.
+        deadline = time.time() + 10.0
+        state: Optional[str] = None
+        while time.time() < deadline:
+            state = _sc_query_status(SERVICE_NAME)
+            if state == "RUNNING":
+                break
+            time.sleep(0.5)
 
-        rc2, out2, _ = _run(["sc", "query", SERVICE_NAME], timeout=5)
-        exit_code = _sc_query_exit_code(SERVICE_NAME)
-        hint = ""
-        if exit_code == 1067:
-            hint = " — winws.exe упал при старте. Возможно, неверные аргументы в .bat."
+        if state != "RUNNING":
+            # Служба НЕ удаляется! Возможно, она ещё стартует или запустится
+            # через несколько секунд. Пользователь сможет проверить вручную.
+            _, query_out, _ = _run(["sc", "query", SERVICE_NAME], timeout=5)
+            return ZapretResult(
+                "install", False,
+                f"служба не перешла в RUNNING за 10 сек (текущее состояние: {state})",
+                f"ImagePath: {image_path}\n\n"
+                f"sc query:\n{query_out}\n\n"
+                f"sc start stderr: {(err or out).strip()}\n\n"
+                f"Служба оставлена в системе — нажмите 'Check Status' через 10 секунд.",
+            )
+
         return ZapretResult(
-            "install", False,
-            f"служба не удержалась в RUNNING{hint}",
-            f"ImagePath:\n{image_path}\n\nsc query:\n{out2}",
+            "install", True,
+            f"служба установлена со стратегией {strategy_bat.stem}",
         )
 
     def remove_service(self) -> ZapretResult:
@@ -686,7 +683,7 @@ class ZapretManager:
         return ZapretResult("remove", True, "готово", "\n".join(lines))
 
     # ================================================================
-    #  Standalone (низкоуровневые)
+    #  Standalone
     # ================================================================
 
     def start_standalone(self, strategy_bat: Path, *, force: bool = False) -> ZapretResult:
@@ -706,7 +703,7 @@ class ZapretManager:
                     "Нажмите «Остановить» или согласитесь остановить её автоматически.",
                 )
             stop_res = self._stop_service_only()
-            print(f"[zapret] auto-stop service before standalone: {stop_res.summary()}")
+            print(f"[zapret] auto-stop service: {stop_res.summary()}")
 
         if _tasklist_has("winws.exe"):
             _run(["taskkill", "/IM", "winws.exe", "/F"], timeout=10)
@@ -814,78 +811,7 @@ class ZapretManager:
             if _sc_query_status(name) is not None:
                 _run(["net", "stop", name], timeout=10)
                 lines.append(f"служба {name} остановлена")
-        if self._clear_strategy_registry():
-            lines.append("стратегия сброшена")
-        killed = self._kill_all_winws()
-        if killed:
-            lines.append(f"убито: {', '.join(killed)}")
-        return ZapretResult("stop_service", True,
-                            "; ".join(lines) if lines else "нечего останавливать")
-
-    def _clear_strategy_registry(self) -> bool:
-        rc, _, _ = _run([
-            "reg", "delete",
-            rf"HKLM\SYSTEM\CurrentControlSet\Services\{SERVICE_NAME}",
-            "/v", "zapret-discord-youtube", "/f",
-        ], timeout=5)
-        return rc == 0
-
-    def _kill_all_winws(self) -> list[str]:
-        killed: list[str] = []
-
-        if self._proc is not None and self._proc.poll() is None:
-            try:
-                self._proc.kill()
-                killed.append("наш процесс")
-            except Exception:
-                pass
-        self._proc = None
-        self._strategy_name = ""
-
-        had_before = _tasklist_has("winws.exe")
-
-        if had_before:
-            _run(["taskkill", "/F", "/T", "/IM", "winws.exe"], timeout=15)
-            time.sleep(0.4)
-
-        if _tasklist_has("winws.exe"):
-            _run(["taskkill", "/F", "/IM", "winws.exe"], timeout=10)
-            time.sleep(0.4)
-
-        still = _tasklist_has("winws.exe")
-        if still:
-            killed.append("winws.exe (НЕ УБИТ!)")
-        elif had_before:
-            killed.append("winws.exe")
-        return killed
-
-    def _unload_windivert(self) -> list[str]:
-        lines: list[str] = []
-        for name in ("WinDivert", "WinDivert1.4", "WinDivert14"):
-            st = _sc_query_status(name)
-            if st is None:
-                continue
-            if st == "RUNNING":
-                _run(["sc", "stop", name], timeout=10)
-                time.sleep(0.4)
-                st2 = _sc_query_status(name) or "не найдена"
-                lines.append(f"{name}: {st} → {st2}")
-            else:
-                lines.append(f"{name}: {st}")
-        return lines
-
-    def _list_bypass_processes(self) -> list[str]:
-        patterns = ("winws", "windivert", "goodbyedpi", "zapret", "byedpi", "spoofdpi")
-        rc, out, _ = _run(["tasklist", "/FO", "CSV", "/NH"], timeout=10)
-        found: list[str] = []
-        if rc == 0:
-            for line in out.splitlines():
-                low = line.lower()
-                if any(p in low for p in patterns):
-                    parts = [p.strip('"') for p in line.split('","')]
-                    if len(parts) >= 2:
-                        found.append(f"{parts[0]} (PID {parts[1]})")
-        return found
+        return ZapretResult("stop_service", True, "; ".join(lines) or "нечего останавливать")
 
     def stop_before_update(self) -> ZapretResult:
         lines: list[str] = []
@@ -1034,6 +960,8 @@ class ZapretManager:
                             f"доступна новая версия: {version} (у вас {local})",
                             GITHUB_RELEASE_URL + version)
 
+    # ---- Fakes --------------------------------------------------------
+
     def list_fakes(self) -> list[Path]:
         if not self.bin_dir.exists():
             return []
@@ -1055,12 +983,17 @@ class ZapretManager:
         except OSError as e:
             return ZapretResult("fake", False, "ошибка копирования", str(e))
 
+    # ---- Diagnostics --------------------------------------------------
+
     def run_diagnostics(self) -> ZapretResult:
         lines: list[str] = []
-        if _sc_query_status("BFE") == "RUNNING":
+
+        bfe_state = _sc_query_status("BFE")
+        if bfe_state == "RUNNING":
             lines.append("✓ Base Filtering Engine запущен")
         else:
-            lines.append("✗ Base Filtering Engine не запущен (нужен для zapret)")
+            lines.append(f"✗ Base Filtering Engine: {bfe_state or 'недоступен'}")
+            lines.append("   Включите службу BFE: services.msc → Base Filtering Engine → Запустить")
 
         rc, out, _ = _run(["netsh", "interface", "tcp", "show", "global"], timeout=10)
         if "timestamps" in out.lower() and "enabled" in out.lower():
@@ -1104,6 +1037,8 @@ class ZapretManager:
             return ZapretResult("tests", True, "тесты запущены в отдельном окне")
         except OSError as e:
             return ZapretResult("tests", False, "не удалось запустить", str(e))
+
+    # ---- Открытие папок / файлов --------------------------------------
 
     def open_folder(self) -> bool:
         if not self.zapret_dir.exists():
@@ -1179,3 +1114,5 @@ if __name__ == "__main__":
     print("PID winws        :", z.get_winws_pid())
     print("Админ            :", is_admin())
     print("Локальная версия :", z.get_local_version())
+    print()
+    print("BFE status       :", _sc_query_status("BFE"))
