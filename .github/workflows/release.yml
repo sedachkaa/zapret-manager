@@ -22,7 +22,7 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -40,19 +40,30 @@ jobs:
           Write-Host "Версия $py совпадает с тегом."
 
       - name: Build with PyInstaller
-        run: pyinstaller build.spec
+        run: python -m PyInstaller build.spec
 
-      - name: Package ZIP
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Installer
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          # zip содержит СОДЕРЖИМОЕ dist/ZapretManager (exe и _internal на верхнем уровне)
-          Compress-Archive -Path dist/ZapretManager/* -DestinationPath "dist/ZapretManager-$tag.zip"
+          $iss = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iss)) { throw "ISCC.exe not found" }
+          & $iss "installer\setup.iss"
+
+      - name: List build outputs
+        shell: pwsh
+        run: |
+          Write-Host "--- dist ---"
+          Get-ChildItem dist | Format-Table Name, Length
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ZapretManager-${{ github.ref_name }}.zip
+          files: |
+            dist/ZapretManager-Setup-*.exe
+            dist/ZapretManager/*.exe
           generate_release_notes: true
           draft: false
           prerelease: false
