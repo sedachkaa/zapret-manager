@@ -1,5 +1,20 @@
 """
 Модуль самообновления приложения и сторонних проектов.
+
+Работает с GitHub Releases API:
+    https://api.github.com/repos/{owner}/{repo}/releases/latest
+
+Поддерживает два типа ассетов:
+    - zip-архивы (например, zapret-discord-youtube) — распаковываются
+      поверх текущей установки с учётом exclude_from_update;
+    - прямые .exe-файлы (например, tg-ws-proxy) — просто скачиваются
+      и заменяют существующий файл.
+
+ВАЖНО про исключения:
+    Пути в exclude_from_update задаются ОТНОСИТЕЛЬНО КОРНЯ ПРОЕКТА
+    (PROJECT_ROOT), а не относительно target_dir распаковки.
+    Поэтому при распаковке мы считаем абсолютный путь файла и берём
+    его путь относительно PROJECT_ROOT для сравнения с исключениями.
 """
 
 from __future__ import annotations
@@ -50,29 +65,21 @@ def _normalize_version(tag: str) -> Version | None:
 
 
 def _normalize_version_string(s: str) -> str:
-    """
-    Нормализует строку версии для сравнения:
-        'v1.10.4'   → '1.10.4'
-        '1.10.4.0'  → '1.10.4'
-        '1.10'      → '1.10'
-    """
+    """'v1.10.4' → '1.10.4', '1.10.4.0' → '1.10.4'."""
     s = s.lstrip("vV").strip()
     parts = s.split(".")
-    # Убираем завершающие ".0" (но оставляем минимум два компонента)
     while len(parts) > 2 and parts[-1] == "0":
         parts.pop()
     return ".".join(parts)
 
 
 def version_matches(a: str, b: str) -> bool:
-    """True, если версии эквивалентны с учётом нормализации '1.10.4.0' == '1.10.4'."""
     if not a or not b:
         return False
     return _normalize_version_string(a) == _normalize_version_string(b)
 
 
 def is_newer_than(current: str, candidate: str) -> bool:
-    """True, если candidate строго новее current."""
     ca = _normalize_version(current)
     cb = _normalize_version(candidate)
     if ca is None or cb is None:
@@ -176,13 +183,19 @@ def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
     return dest
 
 
-def _is_excluded(rel_path: str, excludes: list[str]) -> bool:
-    normalized = rel_path.replace("\\", "/")
+def _is_excluded(rel_from_root: str, excludes: list[str]) -> bool:
+    """
+    True, если путь файла (относительно PROJECT_ROOT, через прямой слэш)
+    подпадает под одно из исключений.
+    Поддерживает папки: если ex заканчивается на '/', считается что
+    всё содержимое папки исключено.
+    """
+    normalized = rel_from_root.replace("\\", "/").lstrip("./")
     for ex in excludes:
-        ex_norm = ex.replace("\\", "/").lstrip("./")
+        ex_norm = ex.replace("\\", "/").lstrip("./").rstrip("/")
         if not ex_norm:
             continue
-        if normalized == ex_norm or normalized.startswith(ex_norm.rstrip("/") + "/"):
+        if normalized == ex_norm or normalized.startswith(ex_norm + "/"):
             return True
     return False
 
@@ -209,9 +222,24 @@ def extract_zip_with_exclusions(
     excludes: list[str] | None = None,
     verbose: bool = True,
 ) -> tuple[int, int]:
+    """
+    Распаковывает zip в target_dir, пропуская файлы,
+    которые есть в excludes И уже существуют на диске.
+
+    КЛЮЧЕВОЕ: excludes заданы относительно PROJECT_ROOT.
+    Мы вычисляем абсолютный путь каждого файла из архива и сравниваем
+    его путь относительно PROJECT_ROOT с исключениями.
+
+    Возвращает (записано, пропущено).
+    """
     excludes = excludes or []
     written = 0
     skipped = 0
+
+    try:
+        project_root_resolved = PROJECT_ROOT.resolve()
+    except OSError:
+        project_root_resolved = PROJECT_ROOT
 
     with zipfile.ZipFile(zip_path, "r") as z:
         file_names = [i.filename for i in z.infolist() if not i.is_dir()]
@@ -228,12 +256,24 @@ def extract_zip_with_exclusions(
                 rel = rel[len(prefix):]
             if not rel:
                 continue
+
             target_file = target_dir / rel
-            if _is_excluded(rel, excludes) and target_file.exists():
+
+            # --- Считаем путь относительно PROJECT_ROOT ---
+            try:
+                abs_target = target_file.resolve()
+                rel_from_root = str(abs_target.relative_to(project_root_resolved)).replace("\\", "/")
+            except (ValueError, OSError):
+                # Не под PROJECT_ROOT — используем rel как есть
+                rel_from_root = rel
+
+            # --- Проверяем исключение ---
+            if target_file.exists() and _is_excluded(rel_from_root, excludes):
                 if verbose:
-                    print(f"[updater] сохраняю {rel} (в исключениях)")
+                    print(f"[updater] сохраняю {rel_from_root} (в исключениях)")
                 skipped += 1
                 continue
+
             target_file.parent.mkdir(parents=True, exist_ok=True)
             with z.open(info, "r") as src, target_file.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
@@ -300,9 +340,28 @@ if __name__ == "__main__":
                 print(f"  {repo}: релизов нет или не найден")
         except Exception as e:
             print(f"  {repo}: ОШИБКА {e}")
+
     print()
-    print("Тесты сравнения версий:")
-    print("  version_matches('1.10.4.0', 'v1.10.4') =", version_matches("1.10.4.0", "v1.10.4"))
-    print("  version_matches('1.10.3', '1.10.3')    =", version_matches("1.10.3", "1.10.3"))
-    print("  is_newer_than('1.10.3', '1.10.4')       =", is_newer_than("1.10.3", "1.10.4"))
-    print("  is_newer_than('1.10.4', '1.10.3')       =", is_newer_than("1.10.4", "1.10.3"))
+    print("Тесты _is_excluded:")
+    test_excludes = [
+        "zapret/lists/list-general-user.txt",
+        "zapret/lists/",
+    ]
+    cases = [
+        ("zapret/lists/list-general-user.txt", True),
+        ("zapret/lists/list-exclude-user.txt", True),  # подпадает под "zapret/lists/"
+        ("zapret/lists/ipset-all.txt", True),          # тоже
+        ("zapret/lists/list-general.txt", True),       # тоже
+        ("zapret/general.bat", False),
+        ("tgproxy/config.json", False),
+        ("app/main.py", False),
+    ]
+    ok = True
+    for path, expected in cases:
+        got = _is_excluded(path, test_excludes)
+        mark = "✓" if got == expected else "✗"
+        if got != expected:
+            ok = False
+        print(f"  {mark} _is_excluded({path!r}) = {got}  (ожидалось {expected})")
+    print()
+    print("Все тесты прошли!" if ok else "ЕСТЬ ОШИБКИ!")
