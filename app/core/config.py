@@ -40,9 +40,16 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "exclude_from_update": [
+        # Основной список доменов — редактируется пользователем
+        "zapret/lists/list-general.txt",
+        # Пользовательские списки
         "zapret/lists/list-general-user.txt",
         "zapret/lists/list-exclude-user.txt",
         "zapret/lists/ipset-exclude-user.txt",
+        # IPSet-лист и его бэкап — управляются кнопкой Update IPSet
+        "zapret/lists/ipset-all.txt",
+        "zapret/lists/ipset-all.txt.backup",
+        # Конфиг tg-ws-proxy
         "tgproxy/config.json",
     ],
     "zapret_path": "zapret/service.bat",
