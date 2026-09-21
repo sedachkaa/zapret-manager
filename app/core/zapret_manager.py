@@ -1,17 +1,16 @@
 """
 Управление zapret-discord-youtube через service.bat.
 
-Модуль предоставляет:
-    - ZapretManager — обёртка над service.bat;
-    - ZapretResult — результат выполнения команды;
-    - утилиты для проверки прав администратора и запуска с UAC.
+Аргументы, которые понимает service.bat:
+    - status_zapret    — проверка статуса службы и TCP
+    - check_updates    — проверка обновлений IPSet/hosts
+    - load_game_filter — применить игровой фильтр
+    - load_user_lists  — принудительно загрузить user-списки
+    - admin            — открыть интерактивное меню от админа
 
-Основные возможности:
-    - is_installed(): установлен ли zapret (есть service.bat и winws.exe);
-    - run(action): запуск service.bat с произвольным аргументом;
-    - get_status(), check_updates(), admin() — обёртки над известными командами;
-    - open_console(): открыть интерактивное меню service.bat в отдельном окне cmd;
-    - run_as_admin(): перезапустить команду с повышением прав (UAC).
+Активность zapret определяется через tasklist (winws.exe).
+service.bat status_zapret возвращает пустой stdout, поэтому
+использовать его для отображения статуса бесполезно.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ class ZapretResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
-    error: str | None = None  # текст ошибки Python (не bat)
+    error: str | None = None
 
     @property
     def success(self) -> bool:
@@ -57,11 +56,6 @@ def is_admin() -> bool:
 
 
 def _decode_console_output(raw: bytes) -> str:
-    """
-    Пытается декодировать вывод bat-файла.
-    На Windows bat-скрипты с кириллицей обычно пишут в cp866 или cp1251,
-    современные (с chcp 65001) — в utf-8. Пробуем по очереди.
-    """
     for enc in ("utf-8", "cp866", "cp1251"):
         try:
             return raw.decode(enc)
@@ -70,20 +64,26 @@ def _decode_console_output(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _tasklist_has(image_name: str) -> bool:
+    """True, если в системе есть запущенный процесс с таким именем."""
+    try:
+        completed = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/NH"],
+            capture_output=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        out = _decode_console_output(completed.stdout).lower()
+        # tasklist при отсутствии процессов пишет "INFO: No tasks..."
+        return image_name.lower() in out
+    except Exception:
+        return False
+
+
 # --- Менеджер ------------------------------------------------------------
 
 class ZapretManager:
-    """
-    Управляет zapret-discord-youtube через service.bat.
-
-    Пример:
-        cfg = Config()
-        z = ZapretManager(cfg)
-        if not z.is_installed():
-            print("zapret не установлен — сначала скачайте релиз")
-        else:
-            print(z.get_status())
-    """
+    """Управляет zapret-discord-youtube через service.bat."""
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -92,40 +92,51 @@ class ZapretManager:
 
     @property
     def bat_path(self) -> Path:
-        """Полный путь к service.bat."""
         return self.cfg.zapret_path
 
     @property
     def zapret_dir(self) -> Path:
-        """Папка zapret/."""
         return PROJECT_ROOT / "zapret"
 
     @property
     def winws_path(self) -> Path:
-        """Полный путь к winws.exe (основной бинарник zapret)."""
         return self.zapret_dir / "bin" / "winws.exe"
+
+    @property
+    def lists_dir(self) -> Path:
+        return self.zapret_dir / "lists"
 
     # --- Проверки ------------------------------------------------------
 
     def is_installed(self) -> bool:
-        """Есть ли service.bat и winws.exe."""
+        """Есть ли service.bat и winws.exe на диске."""
         return self.bat_path.exists() and self.winws_path.exists()
+
+    def is_winws_running(self) -> bool:
+        """Запущен ли процесс winws.exe (признак активного zapret)."""
+        return _tasklist_has("winws.exe")
+
+    def is_service_running(self) -> bool:
+        """Запущена ли служба 'zapret' в Windows."""
+        try:
+            completed = subprocess.run(
+                ["sc", "query", "zapret"],
+                capture_output=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            out = _decode_console_output(completed.stdout)
+            return "RUNNING" in out
+        except Exception:
+            return False
+
+    def is_active(self) -> bool:
+        """Активен ли zapret — winws.exe запущен или служба работает."""
+        return self.is_winws_running() or self.is_service_running()
 
     # --- Запуск --------------------------------------------------------
 
-    def run(
-        self,
-        action: str,
-        *,
-        timeout: int = 60,
-        cwd: Path | None = None,
-    ) -> ZapretResult:
-        """
-        Запускает service.bat с указанным аргументом.
-        Захватывает stdout/stderr.
-        Автоматически отвечает на возможный 'pause' (подаёт EOF через DEVNULL).
-        При таймауте корректно убивает дерево процессов.
-        """
+    def run(self, action: str, *, timeout: int = 60, cwd: Path | None = None) -> ZapretResult:
         if not self.bat_path.exists():
             return ZapretResult(
                 action=action,
@@ -134,32 +145,23 @@ class ZapretManager:
             )
 
         work_dir = cwd or self.zapret_dir
-
-        # CREATE_NO_WINDOW подавляет мигание окна консоли
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
         try:
             proc = subprocess.Popen(
                 ["cmd", "/c", str(self.bat_path), action],
                 cwd=str(work_dir),
-                stdin=subprocess.DEVNULL,   # pause получит EOF и завершится
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=creationflags,
             )
         except OSError as e:
-            return ZapretResult(
-                action=action,
-                returncode=-1,
-                error=f"Не удалось запустить: {e}",
-            )
+            return ZapretResult(action=action, returncode=-1, error=f"Не удалось запустить: {e}")
 
         try:
             stdout_b, stderr_b = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            # Убиваем дерево процессов
             self._kill_process_tree(proc.pid)
             try:
                 stdout_b, stderr_b = proc.communicate(timeout=5)
@@ -182,101 +184,103 @@ class ZapretManager:
 
     @staticmethod
     def _kill_process_tree(pid: int) -> None:
-        """Убивает процесс и всех его потомков (Windows: taskkill /T /F)."""
         try:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                timeout=10,
+                capture_output=True, timeout=10,
             )
         except Exception:
             pass
 
-    # --- Готовые обёртки -----------------------------------------------
+    # --- Готовые обёртки над аргументами --------------------------------
 
     def get_status(self) -> ZapretResult:
-        """Статус службы zapret."""
         return self.run("status_zapret", timeout=20)
 
     def check_updates(self) -> ZapretResult:
-        """Проверка обновлений IPSet/hosts через сам bat."""
-        return self.run("check_updates", timeout=120)
+        return self.run("check_updates", timeout=180)
 
-    def admin_mode(self) -> ZapretResult:
-        """Перезапуск service.bat с правами админа (сам bat вызывает UAC)."""
-        return self.run("admin", timeout=60)
+    def load_game_filter(self) -> ZapretResult:
+        return self.run("load_game_filter", timeout=30)
+
+    def load_user_lists(self) -> ZapretResult:
+        return self.run("load_user_lists", timeout=30)
 
     # --- Интерактивное меню --------------------------------------------
 
-    def open_console(self) -> None:
+    def open_console(self) -> bool:
         """
-        Открывает service.bat в отдельном окне cmd с интерактивным меню.
-        Удобно для операций установки/удаления службы,
-        диагностики, тестов и т.п.
+        Открывает service.bat в отдельном окне cmd С ПРАВАМИ АДМИНА.
+        Сам bat требует админа, поэтому открывать без UAC нет смысла —
+        иначе он всё равно перезапустится через PowerShell, что даёт
+        мигание двух окон. Открываем сразу через ShellExecuteW 'runas'.
         """
+        return self.open_console_as_admin()
+
+    def open_console_as_admin(self) -> bool:
+        """Открывает service.bat через cmd /k с повышением прав (UAC)."""
         if not self.bat_path.exists():
             raise FileNotFoundError(f"service.bat не найден: {self.bat_path}")
-        subprocess.Popen(
-            ["cmd", "/c", "start", "Zapret service.bat", str(self.bat_path)],
-            cwd=str(self.zapret_dir),
-            shell=False,
-        )
-
-    # --- Повышение прав ------------------------------------------------
-
-    @staticmethod
-    def run_as_admin(exe: str, params: str = "", cwd: Path | None = None) -> bool:
-        """
-        Перезапускает программу с UAC (ShellExecuteW "runas").
-        Возвращает True, если пользователь подтвердил UAC.
-        Stdout/stderr при этом НЕ захватываются — команда идёт «в отдельном окне».
-        """
         try:
             res = ctypes.windll.shell32.ShellExecuteW(
                 None,
                 "runas",
-                exe,
-                params,
-                str(cwd) if cwd else None,
+                "cmd.exe",
+                f'/k "{self.bat_path}"',
+                str(self.zapret_dir),
                 1,  # SW_SHOWNORMAL
             )
-            # ShellExecuteW возвращает >32 при успехе
             return int(res) > 32
-        except Exception:
+        except Exception as e:
+            print(f"[zapret] runas failed: {e}")
             return False
 
-    def open_console_as_admin(self) -> bool:
-        """Открыть service.bat в отдельном окне с правами администратора."""
-        if not self.bat_path.exists():
-            raise FileNotFoundError(f"service.bat не найден: {self.bat_path}")
-        return self.run_as_admin(
-            exe="cmd.exe",
-            params=f'/k "{self.bat_path}"',
-            cwd=self.zapret_dir,
-        )
+    # --- Проводник и списки --------------------------------------------
+
+    def open_folder(self) -> bool:
+        if not self.zapret_dir.exists():
+            return False
+        try:
+            os.startfile(str(self.zapret_dir))  # type: ignore[attr-defined]
+            return True
+        except OSError:
+            return False
+
+    def open_lists_folder(self) -> bool:
+        if not self.lists_dir.exists():
+            return False
+        try:
+            os.startfile(str(self.lists_dir))  # type: ignore[attr-defined]
+            return True
+        except OSError:
+            return False
+
+    def edit_user_lists(self) -> bool:
+        target = self.lists_dir / "list-general-user.txt"
+        if not target.exists():
+            try:
+                self.lists_dir.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    "# Список доменов для обхода (по одному на строку)\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                return False
+        try:
+            os.startfile(str(target))  # type: ignore[attr-defined]
+            return True
+        except OSError:
+            return False
 
 
-# --- Быстрый тест при прямом запуске ------------------------------------
+# --- Быстрый тест --------------------------------------------------------
 
 if __name__ == "__main__":
     cfg = Config()
     z = ZapretManager(cfg)
-
-    print("service.bat :", z.bat_path)
-    print("winws.exe   :", z.winws_path)
-    print("Существует  :", z.bat_path.exists())
-    print("Установлен  :", z.is_installed())
-    print("Админ       :", is_admin())
-    print()
-
-    if z.is_installed():
-        print("Пробую status_zapret (timeout=20)...")
-        res = z.get_status()
-        print(res.summary())
-        print("--- stdout ---")
-        print(res.stdout)
-        if res.stderr:
-            print("--- stderr ---")
-            print(res.stderr)
-    else:
-        print("zapret ещё не установлен — сначала скачайте релиз через updater.")
+    print("service.bat       :", z.bat_path)
+    print("Установлен        :", z.is_installed())
+    print("winws запущен     :", z.is_winws_running())
+    print("Служба работает   :", z.is_service_running())
+    print("Активен           :", z.is_active())
+    print("Админ             :", is_admin())

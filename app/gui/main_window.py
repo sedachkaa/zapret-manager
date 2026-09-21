@@ -1,39 +1,30 @@
 """
 Главное окно приложения.
-
-4 вкладки:
-    - Zapret — управление zapret-discord-youtube;
-    - Telegram Proxy — управление tg-ws-proxy;
-    - Обновления — проверка и установка обновлений;
-    - Настройки — редактирование config.json.
-
-Все длительные операции выполняются в фоновых потоках,
-чтобы не блокировать GUI. Результат возвращается в главный поток
-через self.after(0, callback).
 """
 
 from __future__ import annotations
 
 import threading
 import traceback
+from pathlib import Path
+from tkinter import filedialog
 from typing import Callable
 
 import customtkinter as ctk
 
 from app.core import updater
-from app.core.config import Config
+from app.core.config import PROJECT_ROOT, Config
 from app.core.tgproxy_manager import TgProxyManager
 from app.core.zapret_manager import ZapretManager
 
 
-# --- Константы внешнего вида --------------------------------------------
-
 WINDOW_TITLE = "Zapret Manager"
-WINDOW_SIZE = "1000x700"
-MIN_SIZE = (800, 560)
-
-# Текущая версия обёртки. Меняется при релизах.
+WINDOW_SIZE = "1000x720"
+MIN_SIZE = (820, 580)
 APP_VERSION = "0.1.0"
+
+# Интервал автоматического обновления статусов (мс)
+AUTO_REFRESH_MS = 3000
 
 
 class MainWindow(ctk.CTk):
@@ -46,11 +37,9 @@ class MainWindow(ctk.CTk):
         self.zapret = ZapretManager(cfg)
         self.tgproxy = TgProxyManager(cfg)
 
-        # Настройки темы
         ctk.set_appearance_mode(cfg.get("theme", "dark"))
         ctk.set_default_color_theme("blue")
 
-        # Параметры окна
         self.title(f"{WINDOW_TITLE} v{APP_VERSION}")
         self.geometry(WINDOW_SIZE)
         self.minsize(*MIN_SIZE)
@@ -76,12 +65,11 @@ class MainWindow(ctk.CTk):
         self._build_status_bar()
         self.set_status(f"Готово. Репозиторий: {cfg.github_repo}")
 
-        # Начальное обновление статусов
-        self.after(300, self._refresh_zapret_status)
-        self.after(400, self._refresh_tgproxy_status)
+        # Первое обновление и запуск таймера
+        self.after(300, self._auto_refresh)
 
     # ============================================================
-    #  Верхняя панель и статус-бар
+    #  Верхняя панель / статус-бар
     # ============================================================
 
     def _build_header(self) -> None:
@@ -90,8 +78,7 @@ class MainWindow(ctk.CTk):
         header.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            header,
-            text="Zapret Manager",
+            header, text="Zapret Manager",
             font=ctk.CTkFont(size=20, weight="bold"),
         ).grid(row=0, column=0, padx=16, pady=12, sticky="w")
 
@@ -112,15 +99,27 @@ class MainWindow(ctk.CTk):
         self.status_bar.configure(text=text)
 
     # ============================================================
+    #  Автообновление статусов
+    # ============================================================
+
+    def _auto_refresh(self) -> None:
+        """Периодически (каждые 3 сек) обновляет статусы."""
+        try:
+            self._refresh_zapret_status()
+            self._refresh_tgproxy_status()
+        except Exception as e:
+            print("[auto_refresh] error:", e)
+        self.after(AUTO_REFRESH_MS, self._auto_refresh)
+
+    # ============================================================
     #  Вкладка Zapret
     # ============================================================
 
     def _build_zapret_tab(self) -> None:
         tab = self.tab_zapret
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(4, weight=1)
+        tab.grid_rowconfigure(5, weight=1)
 
-        # Статус
         status_frame = ctk.CTkFrame(tab)
         status_frame.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="ew")
         status_frame.grid_columnconfigure(1, weight=1)
@@ -133,37 +132,65 @@ class MainWindow(ctk.CTk):
         )
         self.zapret_status.grid(row=0, column=1, padx=(0, 12), pady=10, sticky="w")
 
-        # Кнопки
-        buttons_frame = ctk.CTkFrame(tab, fg_color="transparent")
-        buttons_frame.grid(row=1, column=0, padx=8, pady=4, sticky="ew")
+        # Главная кнопка
+        main_btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        main_btn_frame.grid(row=1, column=0, padx=8, pady=(8, 4), sticky="ew")
+        main_btn_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(
+            main_btn_frame,
+            text="🔧  Открыть service.bat (все настройки)",
+            command=self._on_zapret_open_console,
+            height=40,
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+
+        buttons_row2 = ctk.CTkFrame(tab, fg_color="transparent")
+        buttons_row2.grid(row=2, column=0, padx=8, pady=2, sticky="ew")
 
         self.zapret_buttons: list[ctk.CTkButton] = []
-        actions = [
+        for i, (label, cmd) in enumerate([
             ("Проверить статус", self._on_zapret_status),
-            ("Открыть service.bat", self._on_zapret_open_console),
-            ("Меню от админа", self._on_zapret_console_admin),
-            ("Обновить zapret", self._on_zapret_update),
-        ]
-        for i, (label, cmd) in enumerate(actions):
-            btn = ctk.CTkButton(buttons_frame, text=label, command=cmd, width=180)
+            ("Игровой фильтр", self._on_zapret_game_filter),
+            ("Загрузить user-списки", self._on_zapret_load_user_lists),
+            ("Проверить обновления", self._on_zapret_check_updates),
+        ]):
+            btn = ctk.CTkButton(buttons_row2, text=label, command=cmd, width=190)
+            btn.grid(row=0, column=i, padx=4, pady=4, sticky="w")
+            self.zapret_buttons.append(btn)
+
+        buttons_row3 = ctk.CTkFrame(tab, fg_color="transparent")
+        buttons_row3.grid(row=3, column=0, padx=8, pady=2, sticky="ew")
+
+        for i, (label, cmd) in enumerate([
+            ("Папка zapret", self._on_zapret_open_folder),
+            ("Папка lists", self._on_zapret_open_lists),
+            ("Редактировать user-листы", self._on_zapret_edit_lists),
+            ("Открыть с админом", self._on_zapret_console_admin),
+        ]):
+            btn = ctk.CTkButton(buttons_row3, text=label, command=cmd, width=190)
             btn.grid(row=0, column=i, padx=4, pady=4, sticky="w")
             self.zapret_buttons.append(btn)
 
         ctk.CTkLabel(tab, text="Журнал:", anchor="w").grid(
-            row=3, column=0, padx=12, pady=(8, 0), sticky="w"
+            row=4, column=0, padx=12, pady=(8, 0), sticky="w"
         )
         self.zapret_log = ctk.CTkTextbox(tab, wrap="word")
-        self.zapret_log.grid(row=4, column=0, padx=8, pady=(0, 8), sticky="nsew")
+        self.zapret_log.grid(row=5, column=0, padx=8, pady=(0, 8), sticky="nsew")
 
     def _refresh_zapret_status(self) -> None:
-        installed = self.zapret.is_installed()
-        if installed:
+        if not self.zapret.is_installed():
             self.zapret_status.configure(
-                text="установлен ✓", text_color=("green", "lightgreen")
+                text="не установлен", text_color=("orange", "orange")
+            )
+            return
+        if self.zapret.is_active():
+            self.zapret_status.configure(
+                text="активен ✓", text_color=("green", "lightgreen")
             )
         else:
             self.zapret_status.configure(
-                text="не установлен", text_color=("orange", "orange")
+                text="установлен, не активен", text_color=("gray40", "gray70")
             )
 
     def _on_zapret_status(self) -> None:
@@ -180,12 +207,54 @@ class MainWindow(ctk.CTk):
             self.log("zapret", res.stdout.strip())
         if res.stderr.strip():
             self.log("zapret", f"stderr: {res.stderr.strip()}")
+        # Дополнительно покажем системный статус
+        active = self.zapret.is_active()
+        self.log("zapret", f"→ winws.exe запущен: {self.zapret.is_winws_running()}")
+        self.log("zapret", f"→ служба zapret работает: {self.zapret.is_service_running()}")
+        self.log("zapret", f"→ итог: {'АКТИВЕН' if active else 'не активен'}")
+        self._refresh_zapret_status()
+        self.set_status("Готово")
+
+    def _on_zapret_game_filter(self) -> None:
+        self._run_async(
+            "Переключение игрового фильтра",
+            work=lambda: self.zapret.load_game_filter(),
+            on_done=lambda res: self._after_simple_zapret(res, "Игровой фильтр"),
+            tab="zapret",
+        )
+
+    def _on_zapret_load_user_lists(self) -> None:
+        self._run_async(
+            "Загрузка user-списков",
+            work=lambda: self.zapret.load_user_lists(),
+            on_done=lambda res: self._after_simple_zapret(res, "User-списки"),
+            tab="zapret",
+        )
+
+    def _on_zapret_check_updates(self) -> None:
+        self._run_async(
+            "Проверка обновлений (bat)",
+            work=lambda: self.zapret.check_updates(),
+            on_done=lambda res: self._after_simple_zapret(res, "Проверка обновлений"),
+            tab="zapret",
+        )
+
+    def _after_simple_zapret(self, res, title: str) -> None:
+        self.log("zapret", f"→ {title}: {res.summary()}")
+        if res.stdout.strip():
+            self.log("zapret", res.stdout.strip())
+        if res.stderr.strip():
+            self.log("zapret", f"stderr: {res.stderr.strip()}")
         self.set_status("Готово")
 
     def _on_zapret_open_console(self) -> None:
         try:
-            self.zapret.open_console()
-            self.log("zapret", "→ Открыто окно service.bat")
+            ok = self.zapret.open_console()
+            self.log(
+                "zapret",
+                "→ Открыто окно service.bat (с правами админа)"
+                if ok else "✗ UAC отклонён",
+            )
         except Exception as e:
             self.log("zapret", f"✗ Ошибка: {e}")
 
@@ -194,42 +263,29 @@ class MainWindow(ctk.CTk):
             ok = self.zapret.open_console_as_admin()
             self.log(
                 "zapret",
-                "→ Открыто окно service.bat с правами админа" if ok else "✗ UAC отклонён",
+                "→ Открыто окно service.bat с правами админа"
+                if ok else "✗ UAC отклонён",
             )
         except Exception as e:
             self.log("zapret", f"✗ Ошибка: {e}")
 
-    def _on_zapret_update(self) -> None:
-        self._run_async(
-            "Обновление zapret",
-            work=self._work_zapret_update,
-            on_done=self._after_zapret_update,
-            tab="zapret",
-        )
-
-    def _work_zapret_update(self):
-        release = updater.check_zapret_update(self.cfg)
-        if release is None:
-            return ("no_release", None, None)
-        written, skipped = updater.apply_release(
-            release,
-            target_dir=self.zapret.zapret_dir,
-            excludes=self.cfg.exclude_from_update,
-        )
-        return ("ok", release, (written, skipped))
-
-    def _after_zapret_update(self, result) -> None:
-        kind, release, stats = result
-        if kind == "no_release":
-            self.log("zapret", "✗ Не удалось получить релиз")
+    def _on_zapret_open_folder(self) -> None:
+        if self.zapret.open_folder():
+            self.log("zapret", "→ Открыта папка zapret/")
         else:
-            written, skipped = stats
-            self.log(
-                "zapret",
-                f"→ Обновлён до {release.tag}. Записано: {written}, пропущено: {skipped}",
-            )
-            self._refresh_zapret_status()
-        self.set_status("Готово")
+            self.log("zapret", "✗ Папка zapret/ не найдена")
+
+    def _on_zapret_open_lists(self) -> None:
+        if self.zapret.open_lists_folder():
+            self.log("zapret", "→ Открыта папка lists/")
+        else:
+            self.log("zapret", "✗ Папка lists/ не найдена")
+
+    def _on_zapret_edit_lists(self) -> None:
+        if self.zapret.edit_user_lists():
+            self.log("zapret", "→ Открыт list-general-user.txt в редакторе")
+        else:
+            self.log("zapret", "✗ Не удалось открыть файл")
 
     # ============================================================
     #  Вкладка Telegram Proxy
@@ -256,13 +312,12 @@ class MainWindow(ctk.CTk):
         buttons_frame.grid(row=1, column=0, padx=8, pady=4, sticky="ew")
 
         self.tgproxy_buttons: list[ctk.CTkButton] = []
-        actions = [
+        for i, (label, cmd) in enumerate([
             ("Запустить", self._on_tgproxy_start),
             ("Остановить", self._on_tgproxy_stop),
             ("Перезапустить", self._on_tgproxy_restart),
             ("Обновить", self._on_tgproxy_update),
-        ]
-        for i, (label, cmd) in enumerate(actions):
+        ]):
             btn = ctk.CTkButton(buttons_frame, text=label, command=cmd, width=150)
             btn.grid(row=0, column=i, padx=4, pady=4, sticky="w")
             self.tgproxy_buttons.append(btn)
@@ -279,11 +334,15 @@ class MainWindow(ctk.CTk):
                 text="не установлен", text_color=("orange", "orange")
             )
             return
-        if self.tgproxy.is_running():
+
+        running = self.tgproxy.is_running()
+        if running:
             pid = self.tgproxy.pid
-            self.tgproxy_status.configure(
-                text=f"запущен (PID {pid})", text_color=("green", "lightgreen")
-            )
+            if self.tgproxy.is_our_process():
+                text = f"запущен (PID {pid})"
+            else:
+                text = f"запущен внешне (PID {pid})"
+            self.tgproxy_status.configure(text=text, text_color=("green", "lightgreen"))
         else:
             version = self.tgproxy.get_version() or "?"
             self.tgproxy_status.configure(
@@ -331,17 +390,17 @@ class MainWindow(ctk.CTk):
         info.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="ew")
         info.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(
-            info, text="Проверка обновлений компонентов", font=ctk.CTkFont(weight="bold")
-        ).grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 6), sticky="w")
+        ctk.CTkLabel(info, text="Проверка обновлений компонентов",
+                     font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, columnspan=2, padx=12, pady=(10, 6), sticky="w"
+        )
 
-        rows = [
+        self.update_labels: dict[str, ctk.CTkLabel] = {}
+        for i, (name, key) in enumerate([
             ("Обёртка", "wrapper"),
             ("zapret-discord-youtube", "zapret"),
             ("tg-ws-proxy", "tgproxy"),
-        ]
-        self.update_labels: dict[str, ctk.CTkLabel] = {}
-        for i, (name, key) in enumerate(rows, start=1):
+        ], start=1):
             ctk.CTkLabel(info, text=f"{name}:").grid(
                 row=i, column=0, padx=(12, 6), pady=4, sticky="w"
             )
@@ -353,9 +412,10 @@ class MainWindow(ctk.CTk):
         btns.grid(row=1, column=0, padx=8, pady=4, sticky="ew")
 
         self.updates_buttons: list[ctk.CTkButton] = []
-        for i, (label, cmd) in enumerate(
-            [("Проверить всё", self._on_check_all), ("Обновить всё", self._on_update_all)]
-        ):
+        for i, (label, cmd) in enumerate([
+            ("Проверить всё", self._on_check_all),
+            ("Обновить всё", self._on_update_all),
+        ]):
             btn = ctk.CTkButton(btns, text=label, command=cmd, width=160)
             btn.grid(row=0, column=i, padx=4, pady=4, sticky="w")
             self.updates_buttons.append(btn)
@@ -376,45 +436,32 @@ class MainWindow(ctk.CTk):
 
     def _work_check_all(self):
         result = {}
-
-        # Обёртка
         try:
-            rel = updater.check_wrapper_update(APP_VERSION, self.cfg)
-            result["wrapper"] = rel
+            result["wrapper"] = updater.check_wrapper_update(APP_VERSION, self.cfg)
         except Exception as e:
             print("wrapper check error:", e)
             result["wrapper"] = None
-
-        # Zapret
         try:
-            rel = updater.fetch_latest_release("Flowseal/zapret-discord-youtube")
-            result["zapret"] = rel
+            result["zapret"] = updater.fetch_latest_release("Flowseal/zapret-discord-youtube")
         except Exception as e:
             print("zapret check error:", e)
             result["zapret"] = None
-
-        # TG proxy
         try:
-            rel = updater.fetch_latest_release("Flowseal/tg-ws-proxy")
-            result["tgproxy"] = rel
+            result["tgproxy"] = updater.fetch_latest_release("Flowseal/tg-ws-proxy")
         except Exception as e:
             print("tgproxy check error:", e)
             result["tgproxy"] = None
-
         return result
 
     def _after_check_all(self, result: dict) -> None:
         for key, rel in result.items():
             lbl = self.update_labels[key]
             if rel:
-                lbl.configure(
-                    text=f"доступна {rel.tag}",
-                    text_color=("green", "lightgreen"),
-                )
+                lbl.configure(text=f"доступна {rel.tag}", text_color=("green", "lightgreen"))
                 self.log("updates", f"{key}: доступна {rel.tag} ({rel.html_url})")
             else:
-                lbl.configure(text="—", text_color=("gray40", "gray70"))
-                self.log("updates", f"{key}: нет данных")
+                lbl.configure(text="нет релизов", text_color=("gray40", "gray70"))
+                self.log("updates", f"{key}: релизов не найдено")
         self.set_status("Готово")
 
     def _on_update_all(self) -> None:
@@ -427,8 +474,6 @@ class MainWindow(ctk.CTk):
 
     def _work_update_all(self):
         log: list[str] = []
-
-        # Zapret
         try:
             rel = updater.check_zapret_update(self.cfg)
             if rel:
@@ -443,7 +488,6 @@ class MainWindow(ctk.CTk):
         except Exception as e:
             log.append(f"zapret → ОШИБКА: {e}")
 
-        # TG proxy
         try:
             res = self.tgproxy.apply_update()
             log.append(f"tgproxy → {res.message}")
@@ -474,29 +518,125 @@ class MainWindow(ctk.CTk):
 
         ctk.CTkLabel(
             tab,
-            text="Файлы из списка не перезаписываются при обновлении, если уже существуют.",
+            text=(
+                "Файлы и папки из списка НЕ перезаписываются при обновлении, "
+                "если уже существуют на диске. Пути — относительно корня проекта, "
+                "через прямой слэш. Для папки — с завершающим '/'."
+            ),
             anchor="w",
             text_color=("gray40", "gray70"),
             font=ctk.CTkFont(size=12),
+            wraplength=900,
+            justify="left",
         ).grid(row=1, column=0, padx=12, pady=(0, 6), sticky="w")
 
         self.settings_excludes = ctk.CTkTextbox(tab, wrap="none", height=200)
         self.settings_excludes.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="nsew")
         self.settings_excludes.insert("1.0", "\n".join(self.cfg.exclude_from_update))
 
-        btns = ctk.CTkFrame(tab, fg_color="transparent")
-        btns.grid(row=4, column=0, padx=8, pady=4, sticky="ew")
+        # Кнопки — в 2 ряда, чтобы всё влезло
+        btns1 = ctk.CTkFrame(tab, fg_color="transparent")
+        btns1.grid(row=4, column=0, padx=8, pady=(4, 0), sticky="ew")
 
-        ctk.CTkButton(btns, text="Сохранить", command=self._on_save_settings, width=140).grid(
-            row=0, column=0, padx=4, pady=4, sticky="w"
-        )
         ctk.CTkButton(
-            btns, text="Сбросить к дефолтным", command=self._on_reset_settings, width=180
+            btns1, text="📄 Добавить файл…", command=self._on_add_exclude_file, width=180
+        ).grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ctk.CTkButton(
+            btns1, text="📁 Добавить папку…", command=self._on_add_exclude_folder, width=180
         ).grid(row=0, column=1, padx=4, pady=4, sticky="w")
+        ctk.CTkButton(
+            btns1, text="Удалить выбранную строку", command=self._on_remove_exclude_line, width=220
+        ).grid(row=0, column=2, padx=4, pady=4, sticky="w")
+
+        btns2 = ctk.CTkFrame(tab, fg_color="transparent")
+        btns2.grid(row=5, column=0, padx=8, pady=(0, 8), sticky="ew")
+
+        ctk.CTkButton(
+            btns2, text="💾 Сохранить", command=self._on_save_settings, width=140
+        ).grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ctk.CTkButton(
+            btns2, text="Сбросить к дефолтным", command=self._on_reset_settings, width=180
+        ).grid(row=0, column=1, padx=4, pady=4, sticky="w")
+        ctk.CTkButton(
+            btns2, text="Показать текущий config.json", command=self._on_show_config, width=220
+        ).grid(row=0, column=2, padx=4, pady=4, sticky="w")
+
+    # --- вспомогательные для настроек ----------------------------------
+
+    def _get_exclude_lines(self) -> list[str]:
+        raw = self.settings_excludes.get("1.0", "end")
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+
+    def _set_exclude_lines(self, lines: list[str]) -> None:
+        self.settings_excludes.delete("1.0", "end")
+        self.settings_excludes.insert("1.0", "\n".join(lines))
+
+    def _to_relative(self, abs_path: str) -> str | None:
+        try:
+            rel = Path(abs_path).resolve().relative_to(PROJECT_ROOT.resolve())
+            return str(rel).replace("\\", "/")
+        except ValueError:
+            return None
+
+    def _on_add_exclude_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Выберите файл для исключения",
+            initialdir=str(PROJECT_ROOT),
+        )
+        if not path:
+            return
+        rel = self._to_relative(path)
+        if rel is None:
+            self.set_status("✗ Файл должен быть внутри папки проекта")
+            return
+        lines = self._get_exclude_lines()
+        if rel in lines:
+            self.set_status(f"Уже в списке: {rel}")
+            return
+        lines.append(rel)
+        self._set_exclude_lines(lines)
+        self.set_status(f"Добавлено: {rel} (не забудь сохранить)")
+
+    def _on_add_exclude_folder(self) -> None:
+        path = filedialog.askdirectory(
+            title="Выберите папку для исключения",
+            initialdir=str(PROJECT_ROOT),
+        )
+        if not path:
+            return
+        rel = self._to_relative(path)
+        if rel is None:
+            self.set_status("✗ Папка должна быть внутри папки проекта")
+            return
+        # Для папки храним путь с завершающим слэшем
+        rel = rel.rstrip("/") + "/"
+        lines = self._get_exclude_lines()
+        if rel in lines:
+            self.set_status(f"Уже в списке: {rel}")
+            return
+        lines.append(rel)
+        self._set_exclude_lines(lines)
+        self.set_status(f"Добавлено: {rel} (не забудь сохранить)")
+
+    def _on_remove_exclude_line(self) -> None:
+        try:
+            # Индекс курсора вида "N.M" → строка N
+            index = self.settings_excludes.index("insert")
+            line_no = int(str(index).split(".")[0])
+        except Exception:
+            self.set_status("Не удалось определить строку")
+            return
+        lines = self._get_exclude_lines()
+        # line_no — 1-based
+        if 1 <= line_no <= len(lines):
+            removed = lines.pop(line_no - 1)
+            self._set_exclude_lines(lines)
+            self.set_status(f"Удалено: {removed} (не забудь сохранить)")
+        else:
+            self.set_status("Строка пустая или вне диапазона")
 
     def _on_save_settings(self) -> None:
-        raw = self.settings_excludes.get("1.0", "end")
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        lines = self._get_exclude_lines()
         self.cfg.set("exclude_from_update", lines)
         self.cfg.save()
         self.log("updates", f"→ Настройки сохранены ({len(lines)} исключений)")
@@ -504,11 +644,20 @@ class MainWindow(ctk.CTk):
 
     def _on_reset_settings(self) -> None:
         from app.core.config import DEFAULT_CONFIG
-
         defaults = DEFAULT_CONFIG["exclude_from_update"]
-        self.settings_excludes.delete("1.0", "end")
-        self.settings_excludes.insert("1.0", "\n".join(defaults))
+        self._set_exclude_lines(list(defaults))
         self.set_status("Сброшено к дефолтным (не забудь сохранить)")
+
+    def _on_show_config(self) -> None:
+        try:
+            os.startfile(str(self.cfg.path))  # type: ignore[attr-defined]
+        except Exception:
+            # открыть в блокноте
+            try:
+                import subprocess
+                subprocess.Popen(["notepad", str(self.cfg.path)])
+            except Exception as e:
+                self.set_status(f"Не удалось открыть: {e}")
 
     # ============================================================
     #  Утилиты: логи, асинхронные задачи
@@ -527,7 +676,6 @@ class MainWindow(ctk.CTk):
         target.see("end")
 
     def _set_buttons_state(self, tab: str, enabled: bool) -> None:
-        """Включает/выключает кнопки вкладки, чтобы не запускать параллельно."""
         buttons_map = {
             "zapret": getattr(self, "zapret_buttons", []),
             "tgproxy": getattr(self, "tgproxy_buttons", []),
@@ -536,18 +684,7 @@ class MainWindow(ctk.CTk):
         for btn in buttons_map.get(tab, []):
             btn.configure(state="normal" if enabled else "disabled")
 
-    def _run_async(
-        self,
-        description: str,
-        work: Callable,
-        on_done: Callable,
-        tab: str,
-    ) -> None:
-        """
-        Запускает work() в фоновом потоке.
-        Пока идёт — блокирует кнопки вкладки, пишет статус.
-        После — вызывает on_done(result) в главном потоке.
-        """
+    def _run_async(self, description: str, work: Callable, on_done: Callable, tab: str) -> None:
         self.set_status(f"{description}...")
         self._set_buttons_state(tab, False)
 
@@ -561,13 +698,7 @@ class MainWindow(ctk.CTk):
 
         threading.Thread(target=runner, daemon=True).start()
 
-    def _finish_async(
-        self,
-        tab: str,
-        on_done: Callable,
-        result,
-        error: str | None,
-    ) -> None:
+    def _finish_async(self, tab: str, on_done: Callable, result, error: str | None) -> None:
         self._set_buttons_state(tab, True)
         if error:
             self.log(tab, f"✗ Ошибка: {error}")

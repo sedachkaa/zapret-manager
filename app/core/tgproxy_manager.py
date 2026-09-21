@@ -1,22 +1,19 @@
 """
 Управление tg-ws-proxy.
 
-Модуль предоставляет:
-    - TgProxyManager — обёртка над процессом TgWsProxy_windows.exe;
-    - TgProxyResult — результат операции;
-    - проверку статуса, запуск, остановку, обновление.
-
-tg-ws-proxy — GUI-приложение (работает в трее), поэтому:
-    - Запускаем через subprocess.Popen, без захвата stdout/stderr.
-    - Не ждём завершения — оно живёт, пока пользователь не выключит.
-    - Останавливаем через terminate() с fallback на taskkill /F.
+Процесс может быть запущен как нами (через Popen), так и внешне
+(пользователь кликнул exe сам, или предыдущий запуск уцелел после
+перезапуска GUI). Поэтому:
+    - is_running() сначала проверяет Popen-handle,
+      затем спрашивает tasklist по имени образа;
+    - stop() умеет убивать как наш процесс, так и внешний
+      (через taskkill /IM).
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,95 +21,126 @@ from app.core import updater
 from app.core.config import PROJECT_ROOT, Config
 
 
+EXE_NAME = "TgWsProxy_windows.exe"
+
+
 # --- Результат операции --------------------------------------------------
 
 @dataclass
 class TgProxyResult:
-    """Результат операции над tg-ws-proxy."""
     action: str
     ok: bool
     message: str = ""
 
     def summary(self) -> str:
         prefix = "OK" if self.ok else "ОШИБКА"
-        return f"[{self.action}] {prefix}: {self.message}" if self.message else f"[{self.action}] {prefix}"
+        if self.message:
+            return f"[{self.action}] {prefix}: {self.message}"
+        return f"[{self.action}] {prefix}"
+
+
+# --- Утилиты -------------------------------------------------------------
+
+def _decode(raw: bytes) -> str:
+    for enc in ("utf-8", "cp866", "cp1251"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _find_pids_by_image(image_name: str) -> list[int]:
+    """Возвращает список PID процессов с заданным именем образа."""
+    try:
+        completed = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        out = _decode(completed.stdout)
+        pids: list[int] = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("INFO"):
+                continue
+            # CSV: "name","pid","session","sess#","mem"
+            parts = [p.strip('" ') for p in line.split('","')]
+            if len(parts) >= 2 and parts[0].lower() == image_name.lower():
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        return pids
+    except Exception:
+        return []
 
 
 # --- Менеджер ------------------------------------------------------------
 
 class TgProxyManager:
-    """
-    Управляет tg-ws-proxy.
-
-    Пример:
-        cfg = Config()
-        t = TgProxyManager(cfg)
-        if not t.is_installed():
-            print("Не установлен")
-        else:
-            t.start()
-            print("PID:", t.pid)
-    """
+    """Управляет tg-ws-proxy."""
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self._proc: subprocess.Popen | None = None  # храним ссылку на процесс
+        self._proc: subprocess.Popen | None = None
+        self._cached_version: str | None = None
 
     # --- Пути ----------------------------------------------------------
 
     @property
     def exe_path(self) -> Path:
-        """
-        Полный путь к exe.
-        В config.json сейчас указан 'tgproxy/TgWsProxy_windows.exe',
-        но реальный файл называется так же, поэтому путь совпадает.
-        """
         return self.cfg.tgproxy_path
 
     @property
     def tgproxy_dir(self) -> Path:
-        """Папка tgproxy/."""
         return PROJECT_ROOT / "tgproxy"
 
     # --- Проверки ------------------------------------------------------
 
     def is_installed(self) -> bool:
-        """True, если exe-файл на месте."""
         return self.exe_path.exists()
 
     def is_running(self) -> bool:
         """
-        True, если процесс жив. Использует сохранённый Popen и проверяет
-        poll() — None означает «работает».
+        True, если процесс TgWsProxy_windows.exe есть в системе.
+        Не важно, кто его запустил — мы или пользователь.
         """
-        if self._proc is None:
+        # 1. Наш handle
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        # 2. Системный поиск
+        pids = _find_pids_by_image(EXE_NAME)
+        if not pids:
+            # процесса больше нет — обнулим handle
+            self._proc = None
             return False
-        return self._proc.poll() is None
+        return True
 
     @property
     def pid(self) -> int | None:
-        """PID работающего процесса или None."""
-        if self._proc is None:
-            return None
-        return self._proc.pid
+        """PID: сначала из нашего handle, потом из tasklist."""
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc.pid
+        pids = _find_pids_by_image(EXE_NAME)
+        return pids[0] if pids else None
+
+    def is_our_process(self) -> bool:
+        """True, если процесс запущен именно нами в этой сессии."""
+        return self._proc is not None and self._proc.poll() is None
 
     # --- Запуск / остановка --------------------------------------------
 
     def start(self) -> TgProxyResult:
-        """Запускает tg-ws-proxy. Если уже запущен — ничего не делает."""
         if not self.is_installed():
-            return TgProxyResult(
-                "start", False,
-                f"Не найден exe: {self.exe_path}",
-            )
+            return TgProxyResult("start", False, f"Не найден exe: {self.exe_path}")
 
         if self.is_running():
             return TgProxyResult("start", True, f"Уже запущен (PID {self.pid})")
 
         creationflags = 0
         if os.name == "nt":
-            # DETACHED_PROCESS — приложение живёт отдельно от нашего
-            # CREATE_NEW_PROCESS_GROUP — чтобы его можно было мягко тормознуть
             creationflags = (
                 getattr(subprocess, "DETACHED_PROCESS", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -135,48 +163,58 @@ class TgProxyManager:
         return TgProxyResult("start", True, f"Запущен (PID {self._proc.pid})")
 
     def stop(self) -> TgProxyResult:
-        """Останавливает tg-ws-proxy. Сначала мягко, потом принудительно."""
+        """
+        Останавливает процесс. Если он наш — terminate() с fallback на taskkill.
+        Если внешний — taskkill по всем найденным PID.
+        """
         if not self.is_running():
             self._proc = None
             return TgProxyResult("stop", True, "Не был запущен")
 
-        pid = self._proc.pid  # type: ignore[union-attr]
+        our_pid = self._proc.pid if (self._proc is not None and self._proc.poll() is None) else None
 
-        # 1. Мягкая попытка
-        try:
-            self._proc.terminate()  # type: ignore[union-attr]
-            self._proc.wait(timeout=5)  # type: ignore[union-attr]
-            self._proc = None
-            return TgProxyResult("stop", True, f"Остановлен (PID {pid})")
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception as e:
-            print(f"[tgproxy] terminate не удался: {e}")
+        # 1. Если это наш — мягкая попытка
+        if our_pid is not None:
+            try:
+                self._proc.terminate()  # type: ignore[union-attr]
+                self._proc.wait(timeout=5)  # type: ignore[union-attr]
+                self._proc = None
+                return TgProxyResult("stop", True, f"Остановлен (PID {our_pid})")
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception as e:
+                print(f"[tgproxy] terminate не удался: {e}")
 
-        # 2. Жёсткая — через taskkill
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                timeout=10,
-            )
+        # 2. Жёстко — taskkill по всем найденным PID (своим или внешним)
+        pids = _find_pids_by_image(EXE_NAME)
+        if not pids:
             self._proc = None
-            return TgProxyResult("stop", True, f"Убит через taskkill (PID {pid})")
-        except Exception as e:
-            return TgProxyResult("stop", False, f"Не удалось убить: {e}")
+            return TgProxyResult("stop", True, "Процесс уже завершён")
+
+        killed = 0
+        for pid in pids:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                killed += 1
+            except Exception as e:
+                print(f"[tgproxy] taskkill {pid} не удался: {e}")
+
+        self._proc = None
+        return TgProxyResult("stop", True, f"Остановлен принудительно ({killed} процессов)")
 
     def restart(self) -> TgProxyResult:
-        """Останавливает и запускает заново."""
         self.stop()
         return self.start()
 
-    # --- Версия --------------------------------------------------------
+    # --- Версия (с кэшем) ----------------------------------------------
 
-    def get_version(self) -> str | None:
-        """
-        Возвращает FileVersion установленного exe (через PowerShell).
-        None, если получить не удалось.
-        """
+    def get_version(self, *, use_cache: bool = True) -> str | None:
+        if use_cache and self._cached_version is not None:
+            return self._cached_version
         if not self.is_installed():
             return None
         try:
@@ -188,26 +226,25 @@ class TgProxyManager:
                 capture_output=True,
                 timeout=10,
                 text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            version = completed.stdout.strip()
-            return version or None
+            version = (completed.stdout or "").strip()
+            if version:
+                self._cached_version = version
+                return version
         except Exception as e:
             print(f"[tgproxy] не удалось узнать версию: {e}")
-            return None
+        return None
+
+    def clear_version_cache(self) -> None:
+        self._cached_version = None
 
     # --- Обновление ----------------------------------------------------
 
     def check_update(self) -> updater.ReleaseInfo | None:
-        """Последний релиз tg-ws-proxy на GitHub."""
         return updater.check_tgproxy_update(self.cfg)
 
-    def apply_update(self, release: updater.ReleaseInfo | None = None,
-                     *, progress_cb=None) -> TgProxyResult:
-        """
-        Скачивает и устанавливает релиз.
-        Если приложение запущено — сначала останавливает, потом обновляет,
-        потом снова запускает (если было запущено).
-        """
+    def apply_update(self, release: updater.ReleaseInfo | None = None, *, progress_cb=None) -> TgProxyResult:
         if release is None:
             release = self.check_update()
         if release is None:
@@ -231,6 +268,8 @@ class TgProxyManager:
                 self.start()
             return TgProxyResult("update", False, f"Ошибка распаковки: {e}")
 
+        self.clear_version_cache()
+
         if was_running:
             self.start()
 
@@ -240,36 +279,13 @@ class TgProxyManager:
         )
 
 
-# --- Быстрый тест при прямом запуске ------------------------------------
+# --- Быстрый тест --------------------------------------------------------
 
 if __name__ == "__main__":
     cfg = Config()
     t = TgProxyManager(cfg)
-
     print("exe         :", t.exe_path)
     print("Существует  :", t.is_installed())
     print("Запущен     :", t.is_running())
+    print("PID         :", t.pid)
     print("Версия      :", t.get_version())
-    print()
-
-    if t.is_installed():
-        print("Пробую запустить...")
-        res = t.start()
-        print(res.summary())
-        print("PID         :", t.pid)
-        print("Запущен     :", t.is_running())
-        print()
-
-        print("Пробую остановить...")
-        res = t.stop()
-        print(res.summary())
-        print("Запущен     :", t.is_running())
-    else:
-        print("tg-ws-proxy ещё не скачан. Скачаем через updater:")
-        rel = t.check_update()
-        if rel:
-            print(f"  Релиз: {rel.tag}, ассет: [{rel.asset_type}] {rel.asset_name}")
-            print("  Применяю...")
-            res = t.apply_update(rel)
-            print(" ", res.summary())
-            print("  Существует:", t.is_installed())
