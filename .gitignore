@@ -21,3 +21,5 @@ config.local.json
 # IDE
 .vscode/
 .idea/
+logs/
+*.log
