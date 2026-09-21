@@ -1,0 +1,13 @@
+{
+  "exclude_from_update": [
+    "zapret/lists/list-general-user.txt",
+    "zapret/lists/list-exclude-user.txt",
+    "zapret/lists/ipset-exclude-user.txt",
+    "tgproxy/config.json"
+  ],
+  "zapret_path": "zapret/service.bat",
+  "tgproxy_path": "tgproxy/TgWsProxy_windows.exe",
+  "github_repo": "ksd/zapret-manager",
+  "auto_check_updates_on_start": true,
+  "theme": "dark"
+}
