@@ -3,7 +3,7 @@
 ; Результат: ZapretManager-Setup-<version>.exe
 
 #define MyAppName "Zapret Manager"
-#define MyAppVersion "0.1.2"
+#define MyAppVersion "0.1.3"
 #define MyAppPublisher "sedachkaa"
 #define MyAppURL "https://github.com/sedachkaa/zapret-manager"
 #define MyAppExeName "ZapretManager.exe"
@@ -33,7 +33,11 @@ OutputBaseFilename=ZapretManager-Setup-{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-; SetupIconFile=..\app\assets\icon.ico
+
+; ИЗМЕНЕНО: раскомментирована иконка установщика.
+; Требует многоразмерный .ico (16/32/48/256), иначе Windows подставит дефолт.
+SetupIconFile=..\app\assets\icon.ico
+
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 
@@ -57,9 +61,14 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 Source: "..\dist\ZapretManager\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
-Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: quicklaunchicon
+; ИЗМЕНЕНО: во всех ярлыках явно указан IconFilename и IconIndex.
+; Без этого Inno иногда подставляет иконку из Filename нестабильно
+; (особенно если приложение самоэлевируется через UAC и на ярлык
+; накладывается щит — тогда Windows может рисовать вместо иконки
+; только щит).
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
+Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: quicklaunchicon; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
