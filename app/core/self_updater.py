@@ -23,6 +23,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from app.core import updater as gh_updater
 from app.core.config import Config
@@ -53,10 +54,18 @@ def check_for_update(current_version: str, cfg: Config) -> gh_updater.ReleaseInf
     return gh_updater.check_wrapper_update(current_version, cfg)
 
 
-def download_release(release: gh_updater.ReleaseInfo) -> Path | None:
-    """Скачивает zip-ассет релиза во временную папку. Возвращает путь к zip."""
+def download_release(
+    release: gh_updater.ReleaseInfo,
+    *,
+    progress_cb: Callable[[float], None] | None = None,
+) -> Path | None:
+    """
+    Скачивает zip-ассет релиза во временную папку.
+    progress_cb(percent: float) — необязательный callback для прогресса.
+    Возвращает путь к zip.
+    """
     if not release.asset_url or not release.asset_name:
-        print("[self_update] у релиза нет zip-ассета")
+        print("[self_update] у релиза нет подходящего ассета")
         return None
 
     tmp_dir = Path(tempfile.gettempdir()) / "zapret-manager-update"
@@ -64,7 +73,7 @@ def download_release(release: gh_updater.ReleaseInfo) -> Path | None:
     out = tmp_dir / release.asset_name
 
     try:
-        gh_updater.download_file(release.asset_url, out)
+        gh_updater.download_file(release.asset_url, out, progress_cb=progress_cb)
         return out
     except Exception as e:
         print(f"[self_update] download failed: {e}")
@@ -98,7 +107,6 @@ def apply_update(zip_path: Path) -> SelfUpdateResult:
     exe_path_str = str(exe_path)
 
     # Helper-скрипт. Используем CRLF и cp866 — стандартные для .bat на Windows.
-    # Текст пишем по-английски, чтобы не ловить проблемы с кодировками.
     content = (
         "@echo off\r\n"
         "echo Waiting for app to close...\r\n"
@@ -149,11 +157,3 @@ def apply_update(zip_path: Path) -> SelfUpdateResult:
         "self_update", True,
         "обновление запущено; приложение сейчас закроется и перезапустится",
     )
-
-
-# --- Быстрый тест --------------------------------------------------------
-
-if __name__ == "__main__":
-    print("frozen               :", getattr(sys, "frozen", False))
-    print("self_update support  :", is_supported())
-    print("sys.executable       :", sys.executable)

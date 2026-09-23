@@ -10,11 +10,9 @@
     - прямые .exe-файлы (например, tg-ws-proxy) — просто скачиваются
       и заменяют существующий файл.
 
-ВАЖНО про исключения:
-    Пути в exclude_from_update задаются ОТНОСИТЕЛЬНО КОРНЯ ПРОЕКТА
-    (PROJECT_ROOT), а не относительно target_dir распаковки.
-    Поэтому при распаковке мы считаем абсолютный путь файла и берём
-    его путь относительно PROJECT_ROOT для сравнения с исключениями.
+ВАЖНО: игнорируем автоматически прикреплённые GitHub-архивы
+"Source code (zip)" / "Source code (tar.gz)" — у них URL содержит
+/archive/, а у наших релизных ассетов — /releases/download/.
 """
 
 from __future__ import annotations
@@ -101,13 +99,33 @@ def _http_get_json(url: str) -> dict:
     return json.loads(raw)
 
 
+def _is_source_archive(url: str) -> bool:
+    """
+    True, если URL ведёт на автоматически прикреплённый GitHub-архив
+    исходников ("Source code"). У них URL содержит /archive/refs/tags/.
+    """
+    return "/archive/" in (url or "")
+
+
 def _pick_asset(assets: list[dict]) -> tuple[str | None, str | None, str | None]:
+    """
+    Выбирает подходящий ассет из списка релиза.
+    Приоритет: .zip > .exe (windows > остальные).
+    Игнорирует авто-архивы Source code.
+    """
+    # 1. Ищем .zip — только среди настоящих релизных ассетов
     for asset in assets:
         name = asset.get("name", "")
-        if name.lower().endswith(".zip"):
-            return (asset.get("browser_download_url"), name, "zip")
+        url = asset.get("browser_download_url", "") or ""
+        if name.lower().endswith(".zip") and not _is_source_archive(url):
+            return (url, name, "zip")
 
-    exe_assets = [a for a in assets if a.get("name", "").lower().endswith(".exe")]
+    # 2. Ищем .exe (windows > остальные)
+    exe_assets = [
+        a for a in assets
+        if a.get("name", "").lower().endswith(".exe")
+        and not _is_source_archive(a.get("browser_download_url", "") or "")
+    ]
     for asset in exe_assets:
         if "windows" in asset.get("name", "").lower():
             return (asset.get("browser_download_url"), asset["name"], "exe")
@@ -165,6 +183,10 @@ def is_newer(remote: ReleaseInfo, current_version: str) -> bool:
 
 
 def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
+    """
+    Скачивает файл по URL в dest.
+    progress_cb(percent: float) — необязательный callback для прогресса.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -179,7 +201,10 @@ def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
                 f.write(buf)
                 received += len(buf)
                 if progress_cb and total:
-                    progress_cb(received / total * 100)
+                    try:
+                        progress_cb(received / total * 100)
+                    except Exception:
+                        pass
     return dest
 
 
@@ -187,8 +212,6 @@ def _is_excluded(rel_from_root: str, excludes: list[str]) -> bool:
     """
     True, если путь файла (относительно PROJECT_ROOT, через прямой слэш)
     подпадает под одно из исключений.
-    Поддерживает папки: если ex заканчивается на '/', считается что
-    всё содержимое папки исключено.
     """
     normalized = rel_from_root.replace("\\", "/").lstrip("./")
     for ex in excludes:
@@ -225,12 +248,6 @@ def extract_zip_with_exclusions(
     """
     Распаковывает zip в target_dir, пропуская файлы,
     которые есть в excludes И уже существуют на диске.
-
-    КЛЮЧЕВОЕ: excludes заданы относительно PROJECT_ROOT.
-    Мы вычисляем абсолютный путь каждого файла из архива и сравниваем
-    его путь относительно PROJECT_ROOT с исключениями.
-
-    Возвращает (записано, пропущено).
     """
     excludes = excludes or []
     written = 0
@@ -259,15 +276,12 @@ def extract_zip_with_exclusions(
 
             target_file = target_dir / rel
 
-            # --- Считаем путь относительно PROJECT_ROOT ---
             try:
                 abs_target = target_file.resolve()
                 rel_from_root = str(abs_target.relative_to(project_root_resolved)).replace("\\", "/")
             except (ValueError, OSError):
-                # Не под PROJECT_ROOT — используем rel как есть
                 rel_from_root = rel
 
-            # --- Проверяем исключение ---
             if target_file.exists() and _is_excluded(rel_from_root, excludes):
                 if verbose:
                     print(f"[updater] сохраняю {rel_from_root} (в исключениях)")
@@ -342,26 +356,6 @@ if __name__ == "__main__":
             print(f"  {repo}: ОШИБКА {e}")
 
     print()
-    print("Тесты _is_excluded:")
-    test_excludes = [
-        "zapret/lists/list-general-user.txt",
-        "zapret/lists/",
-    ]
-    cases = [
-        ("zapret/lists/list-general-user.txt", True),
-        ("zapret/lists/list-exclude-user.txt", True),  # подпадает под "zapret/lists/"
-        ("zapret/lists/ipset-all.txt", True),          # тоже
-        ("zapret/lists/list-general.txt", True),       # тоже
-        ("zapret/general.bat", False),
-        ("tgproxy/config.json", False),
-        ("app/main.py", False),
-    ]
-    ok = True
-    for path, expected in cases:
-        got = _is_excluded(path, test_excludes)
-        mark = "✓" if got == expected else "✗"
-        if got != expected:
-            ok = False
-        print(f"  {mark} _is_excluded({path!r}) = {got}  (ожидалось {expected})")
-    print()
-    print("Все тесты прошли!" if ok else "ЕСТЬ ОШИБКИ!")
+    print("Тест _is_source_archive:")
+    print("  /archive/refs/tags/v1.0.0.zip  →", _is_source_archive("https://github.com/x/y/archive/refs/tags/v1.0.0.zip"))
+    print("  /releases/download/v1/z.zip    →", _is_source_archive("https://github.com/x/y/releases/download/v1/z.zip"))

@@ -951,9 +951,25 @@ class MainWindow(ctk.CTk):
         if not messagebox.askyesno("Обновление обёртки", msg, parent=self):
             self.log("updates", f"→ Обновление до {release.tag} отклонено")
             return
-        self._run_async("Загрузка обновления",
-                        work=lambda: self_updater.download_release(release),
-                        on_done=self._after_download_release, tab="updates")
+        self._run_async(
+            "Загрузка обновления",
+            work=lambda: self_updater.download_release(
+                release,
+                progress_cb=self._on_download_progress,
+            ),
+            on_done=self._after_download_release,
+            tab="updates",
+        )
+
+    def _on_download_progress(self, percent: float) -> None:
+        """
+        Вызывается из фонового потока. Планируем обновление статус-бара
+        в главном потоке.
+        """
+        try:
+            self.after(0, lambda p=percent: self.set_status(f"Загрузка обновления: {p:5.1f}%"))
+        except Exception:
+            pass
 
     def _after_download_release(self, zip_path) -> None:
         if not zip_path:
