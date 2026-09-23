@@ -32,7 +32,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}".TrimStart('v')
-          $py  = (Select-String -Path app/version.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $py  = (Select-String -Path app/version.py -Pattern '^__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
           if ($tag -ne $py) {
             Write-Host "::error::Тег ($tag) не совпадает с app/version.py ($py)"
             exit 1
