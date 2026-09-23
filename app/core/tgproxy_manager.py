@@ -5,15 +5,20 @@
 (пользователь кликнул exe сам, или предыдущий запуск уцелел после
 перезапуска GUI). Поэтому:
     - is_running() сначала проверяет Popen-handle,
-      затем спрашивает tasklist по имени образа;
+      затем спрашивает систему через PowerShell Get-Process;
     - stop() умеет убивать как наш процесс, так и внешний
       (через taskkill /IM).
+
+Проверка через PowerShell, а не tasklist, потому что:
+    - tasklist на русской Windows плохо работает с фильтром IMAGENAME eq;
+    - Get-Process использует WinAPI, не зависит от локали и кодировки.
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +26,8 @@ from app.core import updater
 from app.core.config import PROJECT_ROOT, Config
 
 
-EXE_NAME = "TgWsProxy_windows.exe"
+EXE_NAME = "TgWsProxy_windows.exe"           # имя файла
+PROCESS_NAME = "TgWsProxy_windows"           # имя процесса без .exe (для Get-Process)
 
 
 # --- Результат операции --------------------------------------------------
@@ -50,31 +56,54 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _find_pids_by_image(image_name: str) -> list[int]:
-    """Возвращает список PID процессов с заданным именем образа."""
+def _find_pids_by_name(process_name: str) -> list[int]:
+    """
+    Возвращает список PID по имени процесса (без расширения .exe).
+    Использует PowerShell Get-Process — работает на любой локали Windows.
+    """
+    # Имя процесса для Get-Process пишется без .exe
+    if process_name.lower().endswith(".exe"):
+        process_name = process_name[:-4]
+
+    ps_cmd = (
+        f"Get-Process -Name '{process_name}' -ErrorAction SilentlyContinue "
+        f"| Select-Object -ExpandProperty Id"
+    )
     try:
         completed = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
             capture_output=True,
-            timeout=5,
+            timeout=8,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         out = _decode(completed.stdout)
         pids: list[int] = []
         for line in out.splitlines():
             line = line.strip()
-            if not line or line.startswith("INFO"):
+            if not line:
                 continue
-            # CSV: "name","pid","session","sess#","mem"
-            parts = [p.strip('" ') for p in line.split('","')]
-            if len(parts) >= 2 and parts[0].lower() == image_name.lower():
-                try:
-                    pids.append(int(parts[1]))
-                except ValueError:
-                    pass
+            try:
+                pids.append(int(line))
+            except ValueError:
+                continue
         return pids
-    except Exception:
+    except Exception as e:
+        print(f"[tgproxy] Get-Process failed: {e}")
         return []
+
+
+def _taskkill_by_pid(pid: int) -> bool:
+    """Убивает процесс по PID. Возвращает True при успехе."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return True
+    except Exception as e:
+        print(f"[tgproxy] taskkill {pid} failed: {e}")
+        return False
 
 
 # --- Менеджер ------------------------------------------------------------
@@ -102,28 +131,31 @@ class TgProxyManager:
     def is_installed(self) -> bool:
         return self.exe_path.exists()
 
+    def _system_pids(self) -> list[int]:
+        """Все PID процесса TgWsProxy_windows в системе (наши + внешние)."""
+        return _find_pids_by_name(PROCESS_NAME)
+
     def is_running(self) -> bool:
         """
-        True, если процесс TgWsProxy_windows.exe есть в системе.
+        True, если процесс TgWsProxy_windows есть в системе.
         Не важно, кто его запустил — мы или пользователь.
         """
-        # 1. Наш handle
-        if self._proc is not None and self._proc.poll() is None:
-            return True
-        # 2. Системный поиск
-        pids = _find_pids_by_image(EXE_NAME)
-        if not pids:
-            # процесса больше нет — обнулим handle
+        # 1. Наш handle — если мы его запускали и он ещё жив
+        if self._proc is not None:
+            if self._proc.poll() is None:
+                return True
+            # процесс умер — забываем handle
             self._proc = None
-            return False
-        return True
+
+        # 2. Системный поиск
+        return bool(self._system_pids())
 
     @property
     def pid(self) -> int | None:
-        """PID: сначала из нашего handle, потом из tasklist."""
+        """PID: сначала из нашего handle, потом из системы."""
         if self._proc is not None and self._proc.poll() is None:
             return self._proc.pid
-        pids = _find_pids_by_image(EXE_NAME)
+        pids = self._system_pids()
         return pids[0] if pids else None
 
     def is_our_process(self) -> bool:
@@ -160,6 +192,26 @@ class TgProxyManager:
             self._proc = None
             return TgProxyResult("start", False, f"Не удалось запустить: {e}")
 
+        # Дадим процессу 1.5 секунды: tg-ws-proxy — GUI-приложение,
+        # ему нужно время, чтобы полностью стартовать и не упасть сразу.
+        time.sleep(1.5)
+
+        # Проверим, что процесс действительно жив и его видит система
+        if self._proc.poll() is not None:
+            code = self._proc.returncode
+            self._proc = None
+            return TgProxyResult(
+                "start", False,
+                f"процесс сразу завершился (код {code})",
+            )
+
+        # Проверим, что система его тоже видит
+        if not self._system_pids():
+            # Popen вернул handle, но система процесс не видит —
+            # скорее всего, он запустился в другом контексте
+            print("[tgproxy] предупреждение: Popen OK, но система процесс не видит")
+            # Не считаем это ошибкой — иногда Get-Process тупит на 1-2 сек
+
         return TgProxyResult("start", True, f"Запущен (PID {self._proc.pid})")
 
     def stop(self) -> TgProxyResult:
@@ -183,31 +235,25 @@ class TgProxyManager:
             except subprocess.TimeoutExpired:
                 pass
             except Exception as e:
-                print(f"[tgproxy] terminate не удался: {e}")
+                print(f"[tgproxy] terminate failed: {e}")
 
         # 2. Жёстко — taskkill по всем найденным PID (своим или внешним)
-        pids = _find_pids_by_image(EXE_NAME)
+        pids = self._system_pids()
         if not pids:
             self._proc = None
             return TgProxyResult("stop", True, "Процесс уже завершён")
 
         killed = 0
         for pid in pids:
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True, timeout=10,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
+            if _taskkill_by_pid(pid):
                 killed += 1
-            except Exception as e:
-                print(f"[tgproxy] taskkill {pid} не удался: {e}")
 
         self._proc = None
         return TgProxyResult("stop", True, f"Остановлен принудительно ({killed} процессов)")
 
     def restart(self) -> TgProxyResult:
         self.stop()
+        time.sleep(0.5)
         return self.start()
 
     # --- Версия (с кэшем) ----------------------------------------------
@@ -255,6 +301,7 @@ class TgProxyManager:
             stop_res = self.stop()
             if not stop_res.ok:
                 return TgProxyResult("update", False, f"Не смог остановить: {stop_res.message}")
+            time.sleep(0.5)
 
         try:
             written, skipped = updater.apply_release(
@@ -288,4 +335,5 @@ if __name__ == "__main__":
     print("Существует  :", t.is_installed())
     print("Запущен     :", t.is_running())
     print("PID         :", t.pid)
+    print("Все PID     :", t._system_pids())
     print("Версия      :", t.get_version())
