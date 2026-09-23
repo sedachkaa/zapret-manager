@@ -3,7 +3,7 @@
 ; Результат: ZapretManager-Setup-<version>.exe
 
 #define MyAppName "Zapret Manager"
-#define MyAppVersion "0.1.3"
+#define MyAppVersion "0.1.1"
 #define MyAppPublisher "sedachkaa"
 #define MyAppURL "https://github.com/sedachkaa/zapret-manager"
 #define MyAppExeName "ZapretManager.exe"
@@ -20,12 +20,19 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
 
-; Куда устанавливать — в LOCALAPPDATA, без прав админа
+; Куда устанавливать — в LOCALAPPDATA, без прав админа.
 DefaultDirName={localappdata}\Programs\ZapretManager
 DisableDirPage=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+
+; Мьютекс — не запускать два инсталлятора одновременно.
+SetupMutex=ZapretManagerSetupMutex
+
+; При апгрейде из silent-режима Inno Setup через Restart Manager
+; сам закроет работающий ZapretManager.exe.
+CloseApplications=yes
 
 ; Метаданные
 OutputDir=..\dist
@@ -34,18 +41,13 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 
-; ИЗМЕНЕНО: раскомментирована иконка установщика.
-; Требует многоразмерный .ico (16/32/48/256), иначе Windows подставит дефолт.
 SetupIconFile=..\app\assets\icon.ico
 
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 
-; Архитектура
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-
-; Минимальная версия Windows
 MinVersion=10.0
 
 [Languages]
@@ -57,34 +59,27 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1
 
 [Files]
-; Всё содержимое dist\ZapretManager (exe + _internal) идёт в папку установки
 Source: "..\dist\ZapretManager\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-; ИЗМЕНЕНО: во всех ярлыках явно указан IconFilename и IconIndex.
-; Без этого Inno иногда подставляет иконку из Filename нестабильно
-; (особенно если приложение самоэлевируется через UAC и на ярлык
-; накладывается щит — тогда Windows может рисовать вместо иконки
-; только щит).
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
 Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: quicklaunchicon; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Обычная (визард) установка: показываем галочку "Запустить приложение" на финальном экране.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall; Check: not WizardSilent
+; Silent-режим (обновление): запускаем приложение сразу после установки.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
-; Перед удалением убеждаемся, что приложение закрыто
 Filename: "{cmd}"; Parameters: "/c taskkill /F /IM {#MyAppExeName} /T"; Flags: runhidden; RunOnceId: "KillApp"
 
 [UninstallDelete]
-; Удаляем только файлы приложения. Данные пользователя (config.json, logs, zapret, tgproxy)
-; НЕ трогаем, чтобы при переустановке настройки и списки сохранились.
 Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\logs"
 
 [Code]
-// При удалении спросим, удалять ли данные пользователя
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
@@ -105,7 +100,6 @@ begin
   end;
 end;
 
-// При установке сохраняем язык, если он был выбран ранее
 function InitializeSetup(): Boolean;
 begin
   Result := True;

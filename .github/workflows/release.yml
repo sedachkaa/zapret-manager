@@ -42,16 +42,6 @@ jobs:
       - name: Build with PyInstaller
         run: python -m PyInstaller build.spec
 
-      - name: Package ZIP for self-update
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          # Содержимое dist/ZapretManager кладём в корень архива:
-          # ZapretManager.exe + _internal/ на верхнем уровне
-          Compress-Archive -Path dist/ZapretManager/* -DestinationPath "dist/ZapretManager-$tag.zip"
-          Write-Host "ZIP готов:"
-          Get-ChildItem "dist/ZapretManager-$tag.zip" | Format-Table Name, Length
-
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
@@ -74,7 +64,6 @@ jobs:
           files: |
             dist/ZapretManager-Setup-*.exe
             dist/ZapretManager/*.exe
-            dist/ZapretManager-*.zip
           generate_release_notes: true
           draft: false
           prerelease: false

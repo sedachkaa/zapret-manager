@@ -1,18 +1,21 @@
 """
-Самообновление обёртки Zapret Manager.
+Самообновление обёртки Zapret Manager через Inno Setup installer.
 
 Работает ТОЛЬКО для собранного .exe (PyInstaller frozen).
-При запуске из исходников функция отключена — там обновляйся через git pull.
 
 Алгоритм:
     1. check_for_update() — есть ли новая версия на GitHub.
-    2. download_release() — скачиваем zip-ассет во временную папку.
-    3. apply_update() — создаём helper .bat, который:
-        - ждёт 3 секунды (пока приложение закроется),
-        - распаковывает zip поверх папки приложения,
-        - запускает новый ZapretManager.exe,
-        - удаляет zip и сам себя.
-    4. Приложение должно вызвать os._exit(0) СРАЗУ после успешного apply_update().
+    2. download_release() — скачиваем ZapretManager-Setup-X.Y.Z.exe
+       во временную папку (с прогрессом).
+    3. apply_update() — запускаем installer в silent-режиме:
+           ZapretManager-Setup-X.Y.Z.exe /SILENT /NORESTART /CLOSEAPPLICATIONS
+       Inno Setup сам:
+           - закроет работающий ZapretManager.exe через Restart Manager,
+           - заменит файлы,
+           - обновит ярлыки,
+           - запустит новую версию (см. [Run] в setup.iss).
+    4. Приложение после успешного apply_update() вызывает os._exit(0),
+       чтобы installer смог заменить exe-файл.
 """
 
 from __future__ import annotations
@@ -60,17 +63,30 @@ def download_release(
     progress_cb: Callable[[float], None] | None = None,
 ) -> Path | None:
     """
-    Скачивает zip-ассет релиза во временную папку.
-    progress_cb(percent: float) — необязательный callback для прогресса.
-    Возвращает путь к zip.
+    Скачивает installer (.exe) релиза во временную папку.
+    Возвращает путь к скачанному файлу или None.
     """
     if not release.asset_url or not release.asset_name:
         print("[self_update] у релиза нет подходящего ассета")
         return None
 
+    # Ожидаем installer или хотя бы exe.
+    # Если прилетел zip — это ошибка конфигурации релиза,
+    # сообщаем понятно.
+    if release.asset_type not in ("installer", "exe"):
+        print(f"[self_update] неверный тип ассета: {release.asset_type}")
+        return None
+
     tmp_dir = Path(tempfile.gettempdir()) / "zapret-manager-update"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     out = tmp_dir / release.asset_name
+
+    # Если файл уже есть и не изменялся — перезапишем
+    try:
+        if out.exists():
+            out.unlink()
+    except OSError:
+        pass
 
     try:
         gh_updater.download_file(release.asset_url, out, progress_cb=progress_cb)
@@ -80,11 +96,10 @@ def download_release(
         return None
 
 
-def apply_update(zip_path: Path) -> SelfUpdateResult:
+def apply_update(installer_path: Path) -> SelfUpdateResult:
     """
-    Создаёт и запускает helper .bat, который заменит файлы приложения
-    после его завершения. Приложение должно вызвать os._exit(0)
-    через 1–2 секунды после успешного вызова.
+    Запускает installer в silent-режиме.
+    После успеха приложение должно вызвать os._exit(0).
     """
     if not is_supported():
         return SelfUpdateResult(
@@ -92,68 +107,48 @@ def apply_update(zip_path: Path) -> SelfUpdateResult:
             "самообновление доступно только для .exe (не из исходников)",
         )
 
-    if not zip_path.exists():
-        return SelfUpdateResult("self_update", False, f"zip не найден: {zip_path}")
+    if not installer_path.exists():
+        return SelfUpdateResult("self_update", False, f"installer не найден: {installer_path}")
 
-    exe_path = Path(sys.executable).resolve()
-    app_dir = exe_path.parent
-    exe_name = exe_path.name
+    if not installer_path.name.lower().endswith(".exe"):
+        return SelfUpdateResult(
+            "self_update", False,
+            f"installer должен быть .exe, получено: {installer_path.name}",
+        )
 
-    tmp_dir = Path(tempfile.gettempdir()) / "zapret-manager-update"
-    helper = tmp_dir / "apply_update.bat"
+    installer_str = str(installer_path)
 
-    zip_str = str(zip_path)
-    app_dir_str = str(app_dir)
-    exe_path_str = str(exe_path)
+    # Флаги Inno Setup:
+    #   /SILENT             — тихая установка с прогресс-баром, но без вопросов
+    #   /NORESTART          — не перезагружать компьютер
+    #   /CLOSEAPPLICATIONS  — закрыть запущенные приложения через Restart Manager
+    #   /SUPPRESSMSGBOXES   — подавить все диалоги
+    args = [
+        installer_str,
+        "/SILENT",
+        "/NORESTART",
+        "/CLOSEAPPLICATIONS",
+        "/SUPPRESSMSGBOXES",
+    ]
 
-    # Helper-скрипт. Используем CRLF и cp866 — стандартные для .bat на Windows.
-    content = (
-        "@echo off\r\n"
-        "echo Waiting for app to close...\r\n"
-        "timeout /t 3 /nobreak > nul\r\n"
-        "\r\n"
-        f'cd /d "{app_dir_str}"\r\n'
-        "\r\n"
-        "echo Unpacking update...\r\n"
-        f'powershell -NoProfile -ExecutionPolicy Bypass -Command "'
-        f"Expand-Archive -LiteralPath '{zip_str}' -DestinationPath '{app_dir_str}' -Force"
-        f'"\r\n'
-        "\r\n"
-        "if errorlevel 1 (\r\n"
-        "    echo ERROR: failed to extract archive.\r\n"
-        "    pause\r\n"
-        "    exit /b 1\r\n"
-        ")\r\n"
-        "\r\n"
-        "echo Launching updated application...\r\n"
-        f'start "" "{exe_path_str}"\r\n'
-        "\r\n"
-        "echo Cleanup...\r\n"
-        f'del /f /q "{zip_str}" > nul 2>&1\r\n'
-        "\r\n"
-        # Самоудаление через отдельный cmd с задержкой
-        'start "" cmd /c "timeout /t 2 > nul & del /f /q \\"%~f0\\""\r\n'
-    )
-
-    try:
-        helper.write_text(content, encoding="cp866")
-    except OSError as e:
-        return SelfUpdateResult("self_update", False, f"не удалось создать helper: {e}")
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
 
     try:
         subprocess.Popen(
-            ["cmd.exe", "/c", str(helper)],
-            cwd=str(app_dir),
-            creationflags=(
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            ),
+            args,
+            cwd=str(installer_path.parent),
+            creationflags=creationflags,
             close_fds=True,
         )
     except OSError as e:
-        return SelfUpdateResult("self_update", False, f"не удалось запустить helper: {e}")
+        return SelfUpdateResult("self_update", False, f"не удалось запустить installer: {e}")
 
     return SelfUpdateResult(
         "self_update", True,
-        "обновление запущено; приложение сейчас закроется и перезапустится",
+        "установка началась; приложение закроется, установка завершится автоматически",
     )

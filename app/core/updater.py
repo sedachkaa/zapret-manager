@@ -4,11 +4,13 @@
 Работает с GitHub Releases API:
     https://api.github.com/repos/{owner}/{repo}/releases/latest
 
-Поддерживает два типа ассетов:
-    - zip-архивы (например, zapret-discord-youtube) — распаковываются
-      поверх текущей установки с учётом exclude_from_update;
-    - прямые .exe-файлы (например, tg-ws-proxy) — просто скачиваются
-      и заменяют существующий файл.
+Типы ассетов (поле asset_type в ReleaseInfo):
+    - "installer" — наш ZapretManager-Setup-*.exe. Используется для
+      самообновления обёртки через Inno Setup в silent-режиме.
+    - "zip" — обычный zip-архив (например, zapret-discord-youtube) —
+      распаковывается поверх текущей установки с учётом exclude_from_update;
+    - "exe" — прямой исполняемый файл (например, tg-ws-proxy) —
+      просто скачивается и заменяет существующий файл.
 
 ВАЖНО: игнорируем автоматически прикреплённые GitHub-архивы
 "Source code (zip)" / "Source code (tar.gz)" — у них URL содержит
@@ -44,7 +46,7 @@ class ReleaseInfo:
     name: str
     asset_url: str | None
     asset_name: str | None
-    asset_type: str | None
+    asset_type: str | None       # "installer" | "zip" | "exe"
     html_url: str
 
     @property
@@ -100,32 +102,43 @@ def _http_get_json(url: str) -> dict:
 
 
 def _is_source_archive(url: str) -> bool:
-    """
-    True, если URL ведёт на автоматически прикреплённый GitHub-архив
-    исходников ("Source code"). У них URL содержит /archive/refs/tags/.
-    """
+    """True, если URL ведёт на автоматически прикреплённый GitHub-архив."""
     return "/archive/" in (url or "")
 
 
 def _pick_asset(assets: list[dict]) -> tuple[str | None, str | None, str | None]:
     """
     Выбирает подходящий ассет из списка релиза.
-    Приоритет: .zip > .exe (windows > остальные).
+
+    Приоритет:
+        1. installer — *.exe, содержащий "setup" в имени (наш инсталлятор).
+        2. zip       — обычный .zip (zapret-discord-youtube).
+        3. exe       — остальные .exe, предпочитая "windows" (tg-ws-proxy).
+
     Игнорирует авто-архивы Source code.
     """
-    # 1. Ищем .zip — только среди настоящих релизных ассетов
-    for asset in assets:
-        name = asset.get("name", "")
-        url = asset.get("browser_download_url", "") or ""
-        if name.lower().endswith(".zip") and not _is_source_archive(url):
-            return (url, name, "zip")
+    def _valid(a: dict) -> bool:
+        return not _is_source_archive(a.get("browser_download_url", "") or "")
 
-    # 2. Ищем .exe (windows > остальные)
-    exe_assets = [
-        a for a in assets
-        if a.get("name", "").lower().endswith(".exe")
-        and not _is_source_archive(a.get("browser_download_url", "") or "")
-    ]
+    # 1. Installer (наши ZapretManager-Setup-*.exe)
+    for asset in assets:
+        if not _valid(asset):
+            continue
+        name = asset.get("name", "")
+        lower = name.lower()
+        if lower.endswith(".exe") and "setup" in lower:
+            return (asset.get("browser_download_url"), name, "installer")
+
+    # 2. Обычный zip
+    for asset in assets:
+        if not _valid(asset):
+            continue
+        name = asset.get("name", "")
+        if name.lower().endswith(".zip"):
+            return (asset.get("browser_download_url"), name, "zip")
+
+    # 3. Прочие exe (windows > остальные)
+    exe_assets = [a for a in assets if _valid(a) and a.get("name", "").lower().endswith(".exe")]
     for asset in exe_assets:
         if "windows" in asset.get("name", "").lower():
             return (asset.get("browser_download_url"), asset["name"], "exe")
@@ -189,7 +202,7 @@ def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=120) as resp:
         total = int(resp.headers.get("Content-Length", 0) or 0)
         chunk = 64 * 1024
         received = 0
@@ -209,10 +222,6 @@ def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
 
 
 def _is_excluded(rel_from_root: str, excludes: list[str]) -> bool:
-    """
-    True, если путь файла (относительно PROJECT_ROOT, через прямой слэш)
-    подпадает под одно из исключений.
-    """
     normalized = rel_from_root.replace("\\", "/").lstrip("./")
     for ex in excludes:
         ex_norm = ex.replace("\\", "/").lstrip("./").rstrip("/")
@@ -354,8 +363,3 @@ if __name__ == "__main__":
                 print(f"  {repo}: релизов нет или не найден")
         except Exception as e:
             print(f"  {repo}: ОШИБКА {e}")
-
-    print()
-    print("Тест _is_source_archive:")
-    print("  /archive/refs/tags/v1.0.0.zip  →", _is_source_archive("https://github.com/x/y/archive/refs/tags/v1.0.0.zip"))
-    print("  /releases/download/v1/z.zip    →", _is_source_archive("https://github.com/x/y/releases/download/v1/z.zip"))

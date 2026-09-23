@@ -823,10 +823,10 @@ class MainWindow(ctk.CTk):
             if key == "wrapper":
                 if not self_updater.is_supported():
                     return (key, "обновление обёртки доступно только для .exe")
-                zip_path = self_updater.download_release(release)
-                if not zip_path:
+                installer_path = self_updater.download_release(release)
+                if not installer_path:
                     return (key, "не удалось скачать обновление")
-                res = self_updater.apply_update(zip_path)
+                res = self_updater.apply_update(installer_path)
                 if not res.ok:
                     return (key, res.message)
                 return (key, res.message)
@@ -851,9 +851,9 @@ class MainWindow(ctk.CTk):
         self.log("updates", f"{key}: {msg}")
 
         if key == "wrapper":
-            if "обновление запущено" in msg:
-                self.set_status("Приложение закроется через 2 секунды для обновления...")
-                self.after(2000, lambda: os._exit(0))
+            if "установка началась" in msg:
+                self.set_status("Установка началась. Приложение закроется...")
+                self.after(1000, lambda: os._exit(0))
             else:
                 self.set_status("Обновление обёртки не удалось")
             return
@@ -916,7 +916,7 @@ class MainWindow(ctk.CTk):
         self.set_status("Готово")
 
     # ============================================================
-    #  САМООБНОВЛЕНИЕ ОБЁРТКИ
+    #  САМООБНОВЛЕНИЕ ОБЁРТКИ (installer-based)
     # ============================================================
 
     def _check_wrapper_update_on_start(self, *, force: bool = False) -> None:
@@ -946,7 +946,8 @@ class MainWindow(ctk.CTk):
             f"Доступна новая версия Zapret Manager: {release.tag}\n"
             f"У вас установлена {APP_VERSION}.\n\n"
             f"Обновить сейчас?\n\n"
-            f"Приложение закроется, распакует обновление и запустится заново."
+            f"Приложение закроется, установщик сам заменит файлы "
+            f"и запустит новую версию."
         )
         if not messagebox.askyesno("Обновление обёртки", msg, parent=self):
             self.log("updates", f"→ Обновление до {release.tag} отклонено")
@@ -962,25 +963,23 @@ class MainWindow(ctk.CTk):
         )
 
     def _on_download_progress(self, percent: float) -> None:
-        """
-        Вызывается из фонового потока. Планируем обновление статус-бара
-        в главном потоке.
-        """
         try:
             self.after(0, lambda p=percent: self.set_status(f"Загрузка обновления: {p:5.1f}%"))
         except Exception:
             pass
 
-    def _after_download_release(self, zip_path) -> None:
-        if not zip_path:
+    def _after_download_release(self, installer_path) -> None:
+        if not installer_path:
             self.log("updates", "✗ Не удалось скачать обновление")
             self.set_status("Ошибка загрузки обновления")
             return
-        res = self_updater.apply_update(zip_path)
+
+        res = self_updater.apply_update(installer_path)
         self.log("updates", f"→ {res.summary()}")
+
         if res.ok:
-            self.set_status("Приложение закроется через 2 секунды для обновления...")
-            self.after(2000, lambda: os._exit(0))
+            self.set_status("Установка началась. Приложение закроется...")
+            self.after(1000, lambda: os._exit(0))
         else:
             self.set_status("Ошибка обновления — подробности в журнале")
 
