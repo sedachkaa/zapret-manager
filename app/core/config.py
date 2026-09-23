@@ -1,9 +1,19 @@
 """
 Модуль управления настройками приложения.
 
-Читает и сохраняет config.json, лежащий в корне проекта.
-Предоставляет значения по умолчанию, если файл отсутствует
-или какие-то ключи в нём не заданы.
+Разделяет два понятия:
+    - APP_INSTALL_DIR — где лежит приложение (exe или корень проекта).
+      Сюда попадают: ZapretManager.exe, _internal/.
+    - APP_DATA_DIR — где хранятся данные пользователя:
+      config.json, logs/, zapret/, tgproxy/.
+
+При запуске из исходников обе папки совпадают — это корень проекта.
+При запуске из собранного .exe:
+    APP_INSTALL_DIR — папка с exe (например, C:\\Program Files\\ZapretManager).
+    APP_DATA_DIR    — %LOCALAPPDATA%\\ZapretManager (или папка с exe,
+                      если рядом лежит пустой файл portable.txt).
+
+Дополнительно: get_asset_path() — путь к встроенным ресурсам (app/assets/).
 """
 
 from __future__ import annotations
@@ -15,41 +25,90 @@ from pathlib import Path
 from typing import Any
 
 
-# --- Пути ---------------------------------------------------------------
+# --- Определение путей --------------------------------------------------
 
-def get_project_root() -> Path:
-    """
-    Возвращает путь к корню проекта.
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
 
-    - При запуске из исходников: родительская папка относительно этого файла
-      (т.е. вверх на два уровня: app/core/config.py -> app/core -> app -> корень).
-    - При запуске из собранного PyInstaller .exe: папка, где лежит сам .exe.
+
+def get_install_dir() -> Path:
     """
-    if getattr(sys, "frozen", False):
-        # Приложение собрано в .exe — корень рядом с исполняемым файлом
-        return Path(sys.executable).parent
-    # Запуск из исходников
+    Папка, где лежит приложение.
+    - .exe (frozen): папка с ZapretManager.exe.
+    - исходники: корень проекта.
+    """
+    if _is_frozen():
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent.parent
 
 
-PROJECT_ROOT = get_project_root()
-CONFIG_PATH = PROJECT_ROOT / "config.json"
+def get_data_dir() -> Path:
+    """
+    Папка с данными пользователя.
+    - .exe (frozen) + portable.txt рядом: папка с exe.
+    - .exe (frozen) без portable.txt: %LOCALAPPDATA%\\ZapretManager.
+    - исходники: корень проекта.
+    """
+    if not _is_frozen():
+        return Path(__file__).resolve().parent.parent.parent
+
+    exe_dir = Path(sys.executable).resolve().parent
+
+    # Portable-режим: маркер рядом с exe
+    if (exe_dir / "portable.txt").exists():
+        return exe_dir
+
+    # Обычный режим — LOCALAPPDATA
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        return Path(localappdata) / "ZapretManager"
+
+    # Запасной вариант, если LOCALAPPDATA почему-то нет
+    return Path.home() / "ZapretManager"
+
+
+def get_asset_path(name: str) -> Path:
+    """
+    Возвращает путь к файлу внутри app/assets/.
+
+    - Из исходников: <корень_проекта>/app/assets/<name>
+    - Из собранного PyInstaller .exe: <_MEIPASS>/app/assets/<name>
+
+    Если файл не найден во встроенных ресурсах, проверяет также
+    <APP_INSTALL_DIR>/app/assets/<name> (полезно при ручной распаковке).
+    """
+    if _is_frozen():
+        # PyInstaller распаковывает datas в sys._MEIPASS
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            p = Path(meipass) / "app" / "assets" / name
+            if p.exists():
+                return p
+        # Фолбэк — рядом с exe
+        return Path(sys.executable).resolve().parent / "app" / "assets" / name
+
+    return Path(__file__).resolve().parent.parent / "assets" / name
+
+
+APP_INSTALL_DIR = get_install_dir()
+APP_DATA_DIR = get_data_dir()
+
+# PROJECT_ROOT в коде используется для config.json, zapret/, tgproxy/, logs/ —
+# это всё данные, поэтому равен APP_DATA_DIR.
+PROJECT_ROOT = APP_DATA_DIR
+CONFIG_PATH = APP_DATA_DIR / "config.json"
 
 
 # --- Значения по умолчанию ----------------------------------------------
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "exclude_from_update": [
-        # Основной список доменов — редактируется пользователем
         "zapret/lists/list-general.txt",
-        # Пользовательские списки
         "zapret/lists/list-general-user.txt",
         "zapret/lists/list-exclude-user.txt",
         "zapret/lists/ipset-exclude-user.txt",
-        # IPSet-лист и его бэкап — управляются кнопкой Update IPSet
         "zapret/lists/ipset-all.txt",
         "zapret/lists/ipset-all.txt.backup",
-        # Конфиг tg-ws-proxy
         "tgproxy/config.json",
     ],
     "zapret_path": "zapret/service.bat",
@@ -57,9 +116,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "github_repo": "sedachkaa/zapret-manager",
     "auto_check_updates_on_start": True,
     "theme": "dark",
-    # Последняя выбранная пользователем стратегия zapret.
-    # Подставляется в выпадающий список при старте.
     "last_strategy": "",
+    "shortcut_prompted": False,
 }
 
 
@@ -68,12 +126,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
 class Config:
     """
     Обёртка над config.json.
-
-    Использование:
-        cfg = Config()
-        repo = cfg.get("github_repo")
-        cfg.set("theme", "light")
-        cfg.save()
     """
 
     def __init__(self, path: Path | None = None) -> None:
@@ -84,10 +136,6 @@ class Config:
     # --- I/O -----------------------------------------------------------
 
     def load(self) -> None:
-        """
-        Загружает config.json. Если файла нет, он повреждён или каких-то
-        ключей не хватает — подставляет значения по умолчанию.
-        """
         data: dict[str, Any] = {}
 
         if self.path.exists():
@@ -97,18 +145,16 @@ class Config:
                 if isinstance(loaded, dict):
                     data = loaded
                 else:
-                    print(f"[config] Предупреждение: {self.path} содержит не объект JSON, использую значения по умолчанию.")
+                    print(f"[config] Предупреждение: {self.path} содержит не объект JSON.")
             except (json.JSONDecodeError, OSError) as e:
-                print(f"[config] Ошибка чтения {self.path}: {e}. Использую значения по умолчанию.")
+                print(f"[config] Ошибка чтения {self.path}: {e}")
 
-        # Дополняем недостающие ключи значениями по умолчанию
         for key, value in DEFAULT_CONFIG.items():
             data.setdefault(key, value)
 
         self._data = data
 
     def save(self) -> None:
-        """Сохраняет текущие настройки в config.json."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("w", encoding="utf-8") as f:
@@ -119,43 +165,35 @@ class Config:
     # --- Доступ --------------------------------------------------------
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Возвращает значение по ключу."""
         return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        """Устанавливает значение. Не сохраняет автоматически — вызови save()."""
         self._data[key] = value
 
     def all(self) -> dict[str, Any]:
-        """Возвращает копию всего конфига."""
         return dict(self._data)
 
     # --- Удобные свойства ----------------------------------------------
 
     @property
     def exclude_from_update(self) -> list[str]:
-        """Список относительных путей, которые не перезаписываются при обновлении."""
         value = self._data.get("exclude_from_update", [])
         return value if isinstance(value, list) else []
 
     @property
     def github_repo(self) -> str:
-        """Репозиторий обёртки в формате owner/name."""
         return str(self._data.get("github_repo", ""))
 
     @property
     def zapret_path(self) -> Path:
-        """Полный путь к service.bat."""
         return PROJECT_ROOT / str(self._data.get("zapret_path", ""))
 
     @property
     def tgproxy_path(self) -> Path:
-        """Полный путь к TgWsProxy_windows.exe."""
         return PROJECT_ROOT / str(self._data.get("tgproxy_path", ""))
 
     @property
     def last_strategy(self) -> str:
-        """Последняя выбранная стратегия zapret (пустая строка, если не задана)."""
         return str(self._data.get("last_strategy", "") or "")
 
 
@@ -163,12 +201,13 @@ class Config:
 
 if __name__ == "__main__":
     cfg = Config()
-    print("PROJECT_ROOT  :", PROJECT_ROOT)
-    print("CONFIG_PATH   :", cfg.path)
-    print("Repo          :", cfg.github_repo)
-    print("Zapret        :", cfg.zapret_path)
-    print("TG Proxy      :", cfg.tgproxy_path)
-    print("Last strategy :", cfg.last_strategy or "(не задана)")
-    print("Исключения    :")
-    for item in cfg.exclude_from_update:
-        print("   -", item)
+    print("frozen           :", _is_frozen())
+    print("APP_INSTALL_DIR  :", APP_INSTALL_DIR)
+    print("APP_DATA_DIR     :", APP_DATA_DIR)
+    print("CONFIG_PATH      :", cfg.path)
+    print("Repo             :", cfg.github_repo)
+    print("Zapret           :", cfg.zapret_path)
+    print("TG Proxy         :", cfg.tgproxy_path)
+    print("Last strategy    :", cfg.last_strategy or "(не задана)")
+    print("Asset (list)     :", get_asset_path("list-general.txt"))
+    print("Asset exists     :", get_asset_path("list-general.txt").exists())

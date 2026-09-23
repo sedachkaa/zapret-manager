@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from app.core.config import PROJECT_ROOT, Config
+from app.core.config import PROJECT_ROOT, Config, get_asset_path
 
 
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt"
@@ -1110,6 +1110,91 @@ class ZapretManager:
             return {"exists": 1, "lines": non_empty, "size": target.stat().st_size}
         except OSError:
             return {"exists": 0, "lines": 0, "size": 0}
+        # ---- Фирменный список --------------------------------------------
+
+    def get_bundled_list_info(self, asset_name: str = "list-general.txt") -> dict[str, int]:
+        """
+        Информация о встроенном фирменном списке (в app/assets/).
+        Возвращает dict со статусом файла.
+        """
+        from app.core.config import get_asset_path
+        source = get_asset_path(asset_name)
+        if not source.exists():
+            return {"exists": 0, "lines": 0, "size": 0}
+        try:
+            data = source.read_text(encoding="utf-8", errors="replace")
+            non_empty = sum(
+                1 for line in data.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            )
+            return {
+                "exists": 1,
+                "lines": non_empty,
+                "size": source.stat().st_size,
+            }
+        except OSError:
+            return {"exists": 0, "lines": 0, "size": 0}
+
+    def open_bundled_list(self, asset_name: str = "list-general.txt") -> bool:
+        """
+        Открывает встроенный фирменный список в блокноте (только для просмотра).
+        """
+        from app.core.config import get_asset_path
+        source = get_asset_path(asset_name)
+        if not source.exists():
+            return False
+        try:
+            os.startfile(str(source))
+            return True
+        except OSError:
+            return False
+
+    def install_bundled_list(self, asset_name: str = "list-general.txt") -> ZapretResult:
+        """
+        Устанавливает встроенный фирменный список как активный
+        zapret/lists/list-general.txt.
+
+        Текущий список сохраняется в list-general.txt.backup,
+        чтобы можно было откатиться.
+        """
+        from app.core.config import get_asset_path
+
+        source = get_asset_path(asset_name)
+        if not source.exists():
+            return ZapretResult(
+                "install_list", False,
+                f"встроенный список не найден: {asset_name}",
+                "Проверьте, что в приложении есть app/assets/list-general.txt",
+            )
+
+        target = self.lists_dir / "list-general.txt"
+        backup = self.lists_dir / "list-general.txt.backup"
+
+        try:
+            self.lists_dir.mkdir(parents=True, exist_ok=True)
+
+            # Бэкап текущего списка
+            backup_msg = ""
+            if target.exists():
+                shutil.copy2(target, backup)
+                backup_msg = f" Текущий список сохранён в {backup.name}."
+
+            # Копируем новый
+            shutil.copy2(source, target)
+
+            # Считаем домены
+            data = target.read_text(encoding="utf-8", errors="replace")
+            lines = sum(
+                1 for line in data.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            )
+
+            return ZapretResult(
+                "install_list", True,
+                f"установлен фирменный список ({lines} доменов).{backup_msg}",
+            )
+        except OSError as e:
+            return ZapretResult("install_list", False, "ошибка копирования", str(e))
 
 
 if __name__ == "__main__":
