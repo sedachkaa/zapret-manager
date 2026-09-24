@@ -99,7 +99,10 @@ class MainWindow(ctk.CTk):
         self.log("updates", f"Версия: {APP_VERSION}, frozen: {self_updater.is_supported()}")
 
         self.after(300, self._auto_refresh)
-        self.after(1500, self._check_wrapper_update_on_start)
+        # Мастер первого запуска показывается через 800 мс после старта —
+        # раньше автопроверки обновления обёртки, чтобы не пересекались диалоги.
+        self.after(800, self._check_first_launch)
+        self.after(2000, self._check_wrapper_update_on_start)
 
     # ============================================================
     #  Хедер / статус-бар
@@ -132,7 +135,6 @@ class MainWindow(ctk.CTk):
                                         font=ctk.CTkFont(size=11))
         self.status_bar.grid(row=0, column=0, padx=16, pady=4, sticky="ew")
 
-        # Справа — подпись "by KSD" + кнопка журнала
         ctk.CTkLabel(bar, text="by KSD",
                      font=ctk.CTkFont(size=11, weight="bold"),
                      text_color=("gray45", "gray55")).grid(
@@ -914,6 +916,46 @@ class MainWindow(ctk.CTk):
         self.update_cards["tgproxy"]["current_label"].configure(
             text=self.tgproxy.get_version() or "—")
         self.set_status("Готово")
+
+    # ============================================================
+    #  МАСТЕР ПЕРВОГО ЗАПУСКА
+    # ============================================================
+
+    def _check_first_launch(self) -> None:
+        """
+        Показывает мастер первого запуска, если это первый старт собранного
+        приложения и компоненты ещё не установлены.
+        """
+        # Из исходников мастер не показываем — это для конечных пользователей.
+        if not self_updater.is_supported():
+            return
+
+        if self.cfg.get("first_launch_done", False):
+            return
+
+        # Если всё уже установлено (например, пользователь обновился
+        # с версии, где мастера не было) — не мучаем его диалогом.
+        try:
+            zapret_ok = self.zapret.is_installed() and self.zapret.is_service_running()
+            tgproxy_ok = self.tgproxy.is_installed()
+            if zapret_ok and tgproxy_ok:
+                self.cfg.set("first_launch_done", True)
+                self.cfg.save()
+                self.log("updates", "ℹ Компоненты уже установлены — мастер первого запуска пропущен")
+                return
+        except Exception as e:
+            print(f"[first_launch] ошибка проверки: {e}")
+
+        # Показываем мастер
+        try:
+            from app.gui.first_launch import FirstLaunchDialog
+            FirstLaunchDialog(self, self.cfg, self.zapret, self.tgproxy)
+            self.log("updates", "🚀 Открыт мастер первого запуска")
+        except Exception as e:
+            self.log("updates", f"✗ Не удалось открыть мастер первого запуска: {e}")
+            # Чтобы не пытаться снова и снова — ставим флаг
+            self.cfg.set("first_launch_done", True)
+            self.cfg.save()
 
     # ============================================================
     #  САМООБНОВЛЕНИЕ ОБЁРТКИ (installer-based)

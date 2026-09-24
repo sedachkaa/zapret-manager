@@ -78,13 +78,11 @@ def get_asset_path(name: str) -> Path:
     <APP_INSTALL_DIR>/app/assets/<name> (полезно при ручной распаковке).
     """
     if _is_frozen():
-        # PyInstaller распаковывает datas в sys._MEIPASS
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             p = Path(meipass) / "app" / "assets" / name
             if p.exists():
                 return p
-        # Фолбэк — рядом с exe
         return Path(sys.executable).resolve().parent / "app" / "assets" / name
 
     return Path(__file__).resolve().parent.parent / "assets" / name
@@ -93,7 +91,7 @@ def get_asset_path(name: str) -> Path:
 APP_INSTALL_DIR = get_install_dir()
 APP_DATA_DIR = get_data_dir()
 
-# PROJECT_ROOT в коде используется для config.json, zapret/, tgproxy/, logs/ —
+# PROJECT_ROOT используется для config.json, zapret/, tgproxy/, logs/ —
 # это всё данные, поэтому равен APP_DATA_DIR.
 PROJECT_ROOT = APP_DATA_DIR
 CONFIG_PATH = APP_DATA_DIR / "config.json"
@@ -118,6 +116,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "theme": "dark",
     "last_strategy": "",
     "shortcut_prompted": False,
+    "last_wrapper_check": 0,
+    # Мастер первого запуска: если False — покажем окно установки
+    # при старте приложения (только для собранного .exe).
+    "first_launch_done": False,
 }
 
 
@@ -201,13 +203,14 @@ class Config:
 
 if __name__ == "__main__":
     cfg = Config()
-    print("frozen           :", _is_frozen())
-    print("APP_INSTALL_DIR  :", APP_INSTALL_DIR)
-    print("APP_DATA_DIR     :", APP_DATA_DIR)
-    print("CONFIG_PATH      :", cfg.path)
-    print("Repo             :", cfg.github_repo)
-    print("Zapret           :", cfg.zapret_path)
-    print("TG Proxy         :", cfg.tgproxy_path)
-    print("Last strategy    :", cfg.last_strategy or "(не задана)")
-    print("Asset (list)     :", get_asset_path("list-general.txt"))
-    print("Asset exists     :", get_asset_path("list-general.txt").exists())
+    print("frozen            :", _is_frozen())
+    print("APP_INSTALL_DIR   :", APP_INSTALL_DIR)
+    print("APP_DATA_DIR      :", APP_DATA_DIR)
+    print("CONFIG_PATH       :", cfg.path)
+    print("Repo              :", cfg.github_repo)
+    print("Zapret            :", cfg.zapret_path)
+    print("TG Proxy          :", cfg.tgproxy_path)
+    print("Last strategy     :", cfg.last_strategy or "(не задана)")
+    print("first_launch_done :", cfg.get("first_launch_done"))
+    print("Asset (list)      :", get_asset_path("list-general.txt"))
+    print("Asset exists      :", get_asset_path("list-general.txt").exists())
