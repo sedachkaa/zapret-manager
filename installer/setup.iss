@@ -3,7 +3,7 @@
 ; Результат: ZapretManager-Setup-<version>.exe
 
 #define MyAppName "Zapret Manager"
-#define MyAppVersion "0.1.3"
+#define MyAppVersion "0.1.4"
 #define MyAppPublisher "sedachkaa"
 #define MyAppURL "https://github.com/sedachkaa/zapret-manager"
 #define MyAppExeName "ZapretManager.exe"

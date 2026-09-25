@@ -1,17 +1,14 @@
 """
 Управление tg-ws-proxy.
 
-Процесс может быть запущен как нами (через Popen), так и внешне
-(пользователь кликнул exe сам, или предыдущий запуск уцелел после
-перезапуска GUI). Поэтому:
-    - is_running() сначала проверяет Popen-handle,
-      затем спрашивает систему через PowerShell Get-Process;
-    - stop() умеет убивать как наш процесс, так и внешний
-      (через taskkill /IM).
-
-Проверка через PowerShell, а не tasklist, потому что:
-    - tasklist на русской Windows плохо работает с фильтром IMAGENAME eq;
-    - Get-Process использует WinAPI, не зависит от локали и кодировки.
+Кэш и быстрый режим:
+    - _find_processes_by_names(fast=True) использует ТОЛЬКО tasklist —
+      быстро (~50 мс), работает без прав и без PowerShell.
+    - _find_processes_by_names(fast=False) добавляет Get-CimInstance —
+      даёт путь и время старта, но занимает ~1 сек.
+    - В авто-обновлении GUI используется fast=True.
+    - При явном клике «Обновить статус» — fast=False.
+    - Результат кэшируется на CACHE_TTL секунд.
 """
 
 from __future__ import annotations
@@ -21,13 +18,21 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from app.core import updater
 from app.core.config import PROJECT_ROOT, Config
 
 
-EXE_NAME = "TgWsProxy_windows.exe"           # имя файла
-PROCESS_NAME = "TgWsProxy_windows"           # имя процесса без .exe (для Get-Process)
+EXE_NAME = "TgWsProxy_windows.exe"
+
+PROCESS_NAMES = [
+    "TgWsProxy_windows.exe",
+    "tg-ws-proxy.exe",
+]
+
+# Время жизни кэша результатов поиска (секунды).
+CACHE_TTL = 2.5
 
 
 # --- Результат операции --------------------------------------------------
@@ -45,6 +50,14 @@ class TgProxyResult:
         return f"[{self.action}] {prefix}"
 
 
+@dataclass
+class ProcessInfo:
+    pid: int
+    name: str
+    exe_path: str = ""
+    start_time: str = ""
+
+
 # --- Утилиты -------------------------------------------------------------
 
 def _decode(raw: bytes) -> str:
@@ -56,44 +69,96 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _find_pids_by_name(process_name: str) -> list[int]:
-    """
-    Возвращает список PID по имени процесса (без расширения .exe).
-    Использует PowerShell Get-Process — работает на любой локали Windows.
-    """
-    # Имя процесса для Get-Process пишется без .exe
-    if process_name.lower().endswith(".exe"):
-        process_name = process_name[:-4]
+def _format_cim_date(raw: str) -> str:
+    if not raw:
+        return ""
+    if raw.startswith("/Date(") and raw.endswith(")/"):
+        try:
+            from datetime import datetime
+            ms = int(raw[6:-2])
+            return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return raw
+    return raw
 
-    ps_cmd = (
-        f"Get-Process -Name '{process_name}' -ErrorAction SilentlyContinue "
-        f"| Select-Object -ExpandProperty Id"
-    )
+
+def _find_processes_by_names(names: list[str], *, fast: bool = True) -> list[ProcessInfo]:
+    """
+    Возвращает список процессов с указанными именами.
+
+    fast=True  — только tasklist (быстро, без пути и времени).
+    fast=False — плюс Get-CimInstance (медленно, но с путём и временем).
+    """
+    proc_infos: dict[int, ProcessInfo] = {}
+
+    # --- Базовый список через tasklist ---
+    for raw_name in names:
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {raw_name}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as e:
+            print(f"[tgproxy] tasklist failed for {raw_name}: {e}")
+            continue
+
+        out = _decode(completed.stdout)
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("INFO") or line.startswith("ИНФОРМАЦИЯ"):
+                continue
+            parts = [p.strip('"') for p in line.split('","')]
+            if len(parts) < 2:
+                continue
+            name = parts[0]
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            proc_infos[pid] = ProcessInfo(pid=pid, name=name)
+
+    if fast or not proc_infos:
+        return list(proc_infos.values())
+
+    # --- Обогащение через Get-CimInstance (только в full-режиме) ---
     try:
+        filter_clause = " OR ".join(f"Name='{n}'" for n in names)
+        ps_cmd = (
+            f"Get-CimInstance Win32_Process -Filter \"{filter_clause}\" "
+            f"| ForEach-Object {{ "
+            f"\"$($_.ProcessId)|$($_.ExecutablePath)|"
+            f"$($_.CreationDate)\" }}"
+        )
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
             capture_output=True,
-            timeout=8,
+            timeout=10,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         out = _decode(completed.stdout)
-        pids: list[int] = []
         for line in out.splitlines():
             line = line.strip()
             if not line:
                 continue
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
             try:
-                pids.append(int(line))
+                pid = int(parts[0])
             except ValueError:
                 continue
-        return pids
+            if pid in proc_infos:
+                proc_infos[pid].exe_path = parts[1].strip()
+                proc_infos[pid].start_time = _format_cim_date(parts[2].strip())
     except Exception as e:
-        print(f"[tgproxy] Get-Process failed: {e}")
-        return []
+        print(f"[tgproxy] CIM enrich skipped: {e}")
+
+    return list(proc_infos.values())
 
 
 def _taskkill_by_pid(pid: int) -> bool:
-    """Убивает процесс по PID. Возвращает True при успехе."""
     try:
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -109,12 +174,14 @@ def _taskkill_by_pid(pid: int) -> bool:
 # --- Менеджер ------------------------------------------------------------
 
 class TgProxyManager:
-    """Управляет tg-ws-proxy."""
-
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self._proc: subprocess.Popen | None = None
         self._cached_version: str | None = None
+
+        # Кэш процессов: список + момент времени, когда получен.
+        self._proc_cache: list[ProcessInfo] = []
+        self._proc_cache_time: float = 0.0
 
     # --- Пути ----------------------------------------------------------
 
@@ -131,36 +198,87 @@ class TgProxyManager:
     def is_installed(self) -> bool:
         return self.exe_path.exists()
 
-    def _system_pids(self) -> list[int]:
-        """Все PID процесса TgWsProxy_windows в системе (наши + внешние)."""
-        return _find_pids_by_name(PROCESS_NAME)
+    def _system_processes(self, *, full: bool = False) -> list[ProcessInfo]:
+        """
+        Возвращает список процессов с кэшированием.
+        full=False (по умолчанию) — быстрый режим, только tasklist.
+        full=True — расширенный, с путями и временем (через PowerShell).
+        """
+        # Кэш работает только для быстрого режима — полный всегда свежий.
+        if not full:
+            now = time.time()
+            if now - self._proc_cache_time < CACHE_TTL:
+                return self._proc_cache
+            procs = _find_processes_by_names(PROCESS_NAMES, fast=True)
+            self._proc_cache = procs
+            self._proc_cache_time = now
+            return procs
+
+        # full=True — запрашиваем свежие данные, обновляем кэш
+        procs = _find_processes_by_names(PROCESS_NAMES, fast=False)
+        self._proc_cache = procs
+        self._proc_cache_time = time.time()
+        return procs
+
+    def _invalidate_cache(self) -> None:
+        """Сбрасывает кэш, чтобы следующий запрос был свежим."""
+        self._proc_cache_time = 0.0
 
     def is_running(self) -> bool:
-        """
-        True, если процесс TgWsProxy_windows есть в системе.
-        Не важно, кто его запустил — мы или пользователь.
-        """
-        # 1. Наш handle — если мы его запускали и он ещё жив
         if self._proc is not None:
             if self._proc.poll() is None:
                 return True
-            # процесс умер — забываем handle
             self._proc = None
-
-        # 2. Системный поиск
-        return bool(self._system_pids())
+        return bool(self._system_processes())
 
     @property
-    def pid(self) -> int | None:
-        """PID: сначала из нашего handle, потом из системы."""
+    def pid(self) -> Optional[int]:
+        procs = self._system_processes()
+        if not procs:
+            return None
+        for p in procs:
+            if p.name.lower() == "tg-ws-proxy.exe":
+                return p.pid
         if self._proc is not None and self._proc.poll() is None:
             return self._proc.pid
-        pids = self._system_pids()
-        return pids[0] if pids else None
+        return procs[0].pid
 
     def is_our_process(self) -> bool:
-        """True, если процесс запущен именно нами в этой сессии."""
         return self._proc is not None and self._proc.poll() is None
+
+    # --- Подробный статус ----------------------------------------------
+
+    def get_process_info(self, *, full: bool = False) -> list[ProcessInfo]:
+        """
+        Список процессов. full=True — с путями и временем.
+        """
+        return self._system_processes(full=full)
+
+    def get_status_summary(self, *, full: bool = False) -> str:
+        """
+        Многострочный статус для GUI.
+        full=True — запрашивает пути и время (медленно, но информативно).
+        full=False — быстро, только PID и имя.
+        """
+        procs = self.get_process_info(full=full)
+        if not procs:
+            if self.is_installed():
+                return "Остановлен"
+            return "Не установлен"
+
+        lines: list[str] = []
+        if len(procs) == 1:
+            p = procs[0]
+            lines.append(f"Запущен (PID {p.pid}) — {p.name}")
+            if p.exe_path:
+                lines.append(f"Путь: {p.exe_path}")
+            if p.start_time:
+                lines.append(f"Запущен: {p.start_time}")
+        else:
+            lines.append(f"Запущено процессов: {len(procs)}")
+            for p in procs[:5]:
+                lines.append(f"  PID {p.pid} — {p.name}")
+        return "\n".join(lines)
 
     # --- Запуск / остановка --------------------------------------------
 
@@ -192,11 +310,9 @@ class TgProxyManager:
             self._proc = None
             return TgProxyResult("start", False, f"Не удалось запустить: {e}")
 
-        # Дадим процессу 1.5 секунды: tg-ws-proxy — GUI-приложение,
-        # ему нужно время, чтобы полностью стартовать и не упасть сразу.
-        time.sleep(1.5)
+        time.sleep(2.0)
+        self._invalidate_cache()
 
-        # Проверим, что процесс действительно жив и его видит система
         if self._proc.poll() is not None:
             code = self._proc.returncode
             self._proc = None
@@ -205,58 +321,52 @@ class TgProxyManager:
                 f"процесс сразу завершился (код {code})",
             )
 
-        # Проверим, что система его тоже видит
-        if not self._system_pids():
-            # Popen вернул handle, но система процесс не видит —
-            # скорее всего, он запустился в другом контексте
-            print("[tgproxy] предупреждение: Popen OK, но система процесс не видит")
-            # Не считаем это ошибкой — иногда Get-Process тупит на 1-2 сек
-
         return TgProxyResult("start", True, f"Запущен (PID {self._proc.pid})")
 
     def stop(self) -> TgProxyResult:
-        """
-        Останавливает процесс. Если он наш — terminate() с fallback на taskkill.
-        Если внешний — taskkill по всем найденным PID.
-        """
         if not self.is_running():
             self._proc = None
             return TgProxyResult("stop", True, "Не был запущен")
 
         our_pid = self._proc.pid if (self._proc is not None and self._proc.poll() is None) else None
 
-        # 1. Если это наш — мягкая попытка
         if our_pid is not None:
             try:
-                self._proc.terminate()  # type: ignore[union-attr]
-                self._proc.wait(timeout=5)  # type: ignore[union-attr]
-                self._proc = None
-                return TgProxyResult("stop", True, f"Остановлен (PID {our_pid})")
+                self._proc.terminate()
+                self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
             except Exception as e:
                 print(f"[tgproxy] terminate failed: {e}")
-
-        # 2. Жёстко — taskkill по всем найденным PID (своим или внешним)
-        pids = self._system_pids()
-        if not pids:
             self._proc = None
-            return TgProxyResult("stop", True, "Процесс уже завершён")
+
+        # Всегда получаем свежий список для stop — кэш обходим
+        procs = _find_processes_by_names(PROCESS_NAMES, fast=True)
+        if not procs:
+            self._invalidate_cache()
+            return TgProxyResult("stop", True, "Остановлен")
 
         killed = 0
-        for pid in pids:
-            if _taskkill_by_pid(pid):
+        for p in procs:
+            if _taskkill_by_pid(p.pid):
                 killed += 1
 
-        self._proc = None
-        return TgProxyResult("stop", True, f"Остановлен принудительно ({killed} процессов)")
+        time.sleep(0.3)
+        self._invalidate_cache()
+        remaining = _find_processes_by_names(PROCESS_NAMES, fast=True)
+        if remaining:
+            return TgProxyResult(
+                "stop", False,
+                f"убито {killed}, но осталось {len(remaining)} процессов",
+            )
+        return TgProxyResult("stop", True, f"Остановлено ({killed} процессов)")
 
     def restart(self) -> TgProxyResult:
         self.stop()
         time.sleep(0.5)
         return self.start()
 
-    # --- Версия (с кэшем) ----------------------------------------------
+    # --- Версия --------------------------------------------------------
 
     def get_version(self, *, use_cache: bool = True) -> str | None:
         if use_cache and self._cached_version is not None:
@@ -316,6 +426,7 @@ class TgProxyManager:
             return TgProxyResult("update", False, f"Ошибка распаковки: {e}")
 
         self.clear_version_cache()
+        self._invalidate_cache()
 
         if was_running:
             self.start()
@@ -335,5 +446,10 @@ if __name__ == "__main__":
     print("Существует  :", t.is_installed())
     print("Запущен     :", t.is_running())
     print("PID         :", t.pid)
-    print("Все PID     :", t._system_pids())
     print("Версия      :", t.get_version())
+    print()
+    print("Быстрый статус:")
+    print(t.get_status_summary(full=False))
+    print()
+    print("Полный статус (с путями):")
+    print(t.get_status_summary(full=True))

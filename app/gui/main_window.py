@@ -25,7 +25,7 @@ from app.version import __version__ as APP_VERSION
 WINDOW_TITLE = "Zapret Manager"
 WINDOW_SIZE = "1180x880"
 MIN_SIZE = (1000, 740)
-AUTO_REFRESH_MS = 3000
+AUTO_REFRESH_MS = 5000
 WRAPPER_CHECK_INTERVAL = 3600
 MAX_LOG_LINES = 500
 SCROLL_STEP = 60
@@ -66,6 +66,7 @@ class MainWindow(ctk.CTk):
         self._last_zapret_color: tuple | None = None
         self._last_tgproxy_text: str = ""
         self._last_tgproxy_color: tuple | None = None
+        self._last_tgproxy_details: str = ""
         self._last_status_text: str = ""
 
         ctk.set_appearance_mode(cfg.get("theme", "dark"))
@@ -74,6 +75,9 @@ class MainWindow(ctk.CTk):
         self.title(f"{WINDOW_TITLE} v{APP_VERSION}")
         self.geometry(WINDOW_SIZE)
         self.minsize(*MIN_SIZE)
+
+        self.after(50, self._maximize_window)
+
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
@@ -97,10 +101,21 @@ class MainWindow(ctk.CTk):
         self.log("updates", f"=== Сессия запущена: {self._session_start:%Y-%m-%d %H:%M:%S} ===")
         self.log("updates", f"Файл журнала: {self.log_file}")
         self.log("updates", f"Версия: {APP_VERSION}, frozen: {self_updater.is_supported()}")
+        self.log("updates", f"GitHub-токен: {'настроен' if updater.has_github_token() else 'не настроен'}")
 
         self.after(300, self._auto_refresh)
         self.after(800, self._check_first_launch)
         self.after(2000, self._check_wrapper_update_on_start)
+
+    # ============================================================
+    #  Управление окном
+    # ============================================================
+
+    def _maximize_window(self) -> None:
+        try:
+            self.state("zoomed")
+        except Exception as e:
+            print(f"[gui] не удалось максимизировать окно: {e}")
 
     # ============================================================
     #  Хедер / статус-бар
@@ -390,11 +405,6 @@ class MainWindow(ctk.CTk):
         self.set_status(f"Стратегия сохранена: {value}")
 
     def _refresh_strategies_menu(self) -> None:
-        """
-        Перечитывает список .bat-стратегий в папке zapret и обновляет
-        выпадающее меню. Полезно после установки/обновления zapret,
-        когда появляются новые .bat-файлы.
-        """
         try:
             strategies = [p.stem for p in self.zapret.list_strategies()]
             current = self.strategy_var.get()
@@ -600,12 +610,24 @@ class MainWindow(ctk.CTk):
         status_card.grid(row=0, column=0, padx=PAD_SECTION, pady=(PAD_SECTION, 4), sticky="ew")
         status_card.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(status_card, text="●", font=ctk.CTkFont(size=18),
-                     text_color=("gray60", "gray50")).grid(
-            row=0, column=0, padx=(14, 6), pady=10, sticky="w")
-        self.tgproxy_status = ctk.CTkLabel(status_card, text="проверка...", anchor="w",
-                                            font=ctk.CTkFont(size=13, weight="bold"))
-        self.tgproxy_status.grid(row=0, column=1, padx=(0, 12), pady=10, sticky="ew")
+        self.tgproxy_indicator = ctk.CTkLabel(
+            status_card, text="●", font=ctk.CTkFont(size=18),
+            text_color=("gray60", "gray50"))
+        self.tgproxy_indicator.grid(row=0, column=0, padx=(14, 6), pady=(10, 2), sticky="w")
+
+        self.tgproxy_status = ctk.CTkLabel(
+            status_card, text="проверка...", anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"))
+        self.tgproxy_status.grid(row=0, column=1, padx=(0, 12), pady=(10, 2), sticky="ew")
+
+        self.tgproxy_details = ctk.CTkLabel(
+            status_card, text="", anchor="w", justify="left",
+            text_color=("gray45", "gray60"),
+            font=ctk.CTkFont(size=11),
+            wraplength=1000,
+        )
+        self.tgproxy_details.grid(row=1, column=0, columnspan=2,
+                                   padx=16, pady=(0, 10), sticky="w")
 
         card, body = self._make_card(tab, title="Управление")
         card.grid(row=1, column=0, padx=PAD_SECTION, pady=4, sticky="ew")
@@ -617,6 +639,7 @@ class MainWindow(ctk.CTk):
             ("▶  Запустить", self._on_tgproxy_start),
             ("⏹  Остановить", self._on_tgproxy_stop),
             ("⟳  Перезапустить", self._on_tgproxy_restart),
+            ("🔄  Обновить статус", self._on_tgproxy_refresh),
         ]):
             btn = ctk.CTkButton(row, text=label, command=cmd, width=190, height=36,
                                  font=ctk.CTkFont(size=12, weight="bold"))
@@ -633,23 +656,28 @@ class MainWindow(ctk.CTk):
         if not self.tgproxy.is_installed():
             if self._last_tgproxy_text != "not_installed":
                 self._last_tgproxy_text = "not_installed"
+                self._last_tgproxy_details = ""
                 self.tgproxy_status.configure(text="не установлен", text_color=STATUS_WARN)
+                self.tgproxy_details.configure(text="")
+                self.tgproxy_indicator.configure(text_color=("gray60", "gray50"))
             return
 
-        if self.tgproxy.is_running():
+        running = self.tgproxy.is_running()
+
+        if running:
             pid = self.tgproxy.pid
-            text = f"Запущен (PID {pid})" if self.tgproxy.is_our_process() \
-                else f"Запущен внешне (PID {pid})"
+            first = f"Запущен (PID {pid})"
             color = STATUS_OK
         else:
             version = self.tgproxy.get_version() or "?"
-            text = f"Остановлен (v{version})"
+            first = f"Остановлен (v{version})"
             color = STATUS_NEUTRAL
 
-        if text != self._last_tgproxy_text or color != self._last_tgproxy_color:
-            self._last_tgproxy_text = text
+        if first != self._last_tgproxy_text or color != self._last_tgproxy_color:
+            self._last_tgproxy_text = first
             self._last_tgproxy_color = color
-            self.tgproxy_status.configure(text=text, text_color=color)
+            self.tgproxy_status.configure(text=first, text_color=color)
+            self.tgproxy_indicator.configure(text_color=color)
 
     def _on_tgproxy_start(self) -> None:
         res = self.tgproxy.start()
@@ -665,6 +693,53 @@ class MainWindow(ctk.CTk):
         res = self.tgproxy.restart()
         self.log("tgproxy", f"→ {res.summary()}")
         self._refresh_tgproxy_status()
+
+    def _on_tgproxy_refresh(self) -> None:
+        self.set_status("Обновление статуса tg-ws-proxy…")
+        self._set_buttons_state("tgproxy", False)
+
+        def work():
+            return self.tgproxy.get_process_info(full=True)
+
+        def done(procs):
+            self._set_buttons_state("tgproxy", True)
+
+            if not procs:
+                self._last_tgproxy_details = ""
+                self.tgproxy_details.configure(text="")
+                self.log("tgproxy", "→ Процессы не найдены")
+                self.set_status("Готово")
+                return
+
+            lines: list[str] = []
+            for p in procs:
+                entry = f"PID {p.pid} — {p.name}"
+                if p.exe_path:
+                    entry += f" | {p.exe_path}"
+                if p.start_time:
+                    entry += f" | старт: {p.start_time}"
+                lines.append(entry)
+                self.log("tgproxy", "→ " + entry)
+
+            details_text = "  •  ".join(lines)
+            self._last_tgproxy_details = details_text
+            self.tgproxy_details.configure(text=details_text)
+            self.set_status("Статус обновлён")
+
+        def runner():
+            try:
+                result = work()
+                self.after(0, lambda: done(result))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self._tgproxy_refresh_error(err))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _tgproxy_refresh_error(self, err: str) -> None:
+        self._set_buttons_state("tgproxy", True)
+        self.log("tgproxy", f"✗ Ошибка обновления статуса: {err}")
+        self.set_status("Ошибка обновления статуса")
 
     # ============================================================
     #  ВКЛАДКА ОБНОВЛЕНИЯ
@@ -944,10 +1019,6 @@ class MainWindow(ctk.CTk):
     # ============================================================
 
     def _check_first_launch(self) -> None:
-        """
-        Показывает мастер первого запуска, если это первый старт собранного
-        приложения и компоненты ещё не установлены.
-        """
         if not self_updater.is_supported():
             return
 
@@ -975,7 +1046,7 @@ class MainWindow(ctk.CTk):
             self.cfg.save()
 
     # ============================================================
-    #  САМООБНОВЛЕНИЕ ОБЁРТКИ (installer-based)
+    #  САМООБНОВЛЕНИЕ ОБЁРТКИ
     # ============================================================
 
     def _check_wrapper_update_on_start(self, *, force: bool = False) -> None:
@@ -1057,10 +1128,12 @@ class MainWindow(ctk.CTk):
         self.sub_excl = sub.add("📋  Исключения")
         self.sub_bundle_auto = sub.add("🚀  Список и автозапуск")
         self.sub_paths = sub.add("📁  Папки и обновление")
+        self.sub_token = sub.add("🔑  GitHub токен")
 
         self._build_subtab_exclusions()
         self._build_subtab_bundle_autostart()
         self._build_subtab_paths()
+        self._build_subtab_token()
 
     def _build_subtab_exclusions(self) -> None:
         tab = self.sub_excl
@@ -1223,6 +1296,180 @@ class MainWindow(ctk.CTk):
             command=lambda: self._check_wrapper_update_on_start(force=True),
             width=230, height=34)
         self.check_wrapper_btn.grid(row=0, column=1, padx=4, sticky="e")
+
+    def _build_subtab_token(self) -> None:
+        """Под-вкладка с информацией о GitHub-токене."""
+        tab = self.sub_token
+        tab.grid_columnconfigure(0, weight=1)
+
+        # --- Статус ---
+        card, body = self._make_card(tab, title="🔑  GitHub-токен")
+        card.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="ew")
+
+        ctk.CTkLabel(
+            body,
+            text=("Токен нужен, чтобы увеличить лимит запросов к GitHub API\n"
+                  "с 60 до 5000 в час. Без токена при частых проверках обновлений\n"
+                  "можно получить ошибку «rate limit exceeded»."),
+            anchor="w", justify="left", wraplength=1000,
+            text_color=("gray45", "gray60"), font=ctk.CTkFont(size=11),
+        ).grid(row=0, column=0, padx=4, pady=(0, 12), sticky="w")
+
+        # Строка «Статус: …»
+        status_row = ctk.CTkFrame(body, fg_color="transparent")
+        status_row.grid(row=1, column=0, sticky="ew")
+
+        ctk.CTkLabel(
+            status_row, text="Статус:",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=0, column=0, padx=(4, 8), pady=4, sticky="w")
+
+        self.token_status_label = ctk.CTkLabel(
+            status_row, text="—",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w",
+        )
+        self.token_status_label.grid(row=0, column=1, padx=(0, 8), pady=4, sticky="w")
+
+        # Кнопки
+        btn_row = ctk.CTkFrame(body, fg_color="transparent")
+        btn_row.grid(row=2, column=0, pady=(12, 0), sticky="ew")
+
+        ctk.CTkButton(
+            btn_row, text="🔄  Обновить статус",
+            command=self._refresh_token_status,
+            width=200, height=36,
+        ).grid(row=0, column=0, padx=4, pady=4, sticky="w")
+
+        ctk.CTkButton(
+            btn_row, text="📖  Как настроить?",
+            command=self._show_token_help,
+            width=200, height=36,
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=1, padx=4, pady=4, sticky="w")
+
+        # Подсказка про перезапуск
+        ctk.CTkLabel(
+            body,
+            text=("⚠ После настройки токена обязательно перезапустите приложение —\n"
+                  "переменные окружения читаются только при запуске процесса."),
+            anchor="w", justify="left", wraplength=1000,
+            text_color=STATUS_WARN, font=ctk.CTkFont(size=11),
+        ).grid(row=3, column=0, padx=4, pady=(12, 0), sticky="w")
+
+        # Заполняем статус сразу
+        self._refresh_token_status()
+
+    def _refresh_token_status(self) -> None:
+        """Обновляет надпись со статусом токена."""
+        if updater.has_github_token():
+            self.token_status_label.configure(
+                text="Настроен ✓  (лимит 5000 запросов/час)",
+                text_color=STATUS_OK,
+            )
+        else:
+            self.token_status_label.configure(
+                text="Не настроен  (лимит 60 запросов/час)",
+                text_color=STATUS_WARN,
+            )
+
+    def _show_token_help(self) -> None:
+        """Открывает окно с пошаговой инструкцией по настройке токена."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Как настроить GitHub-токен")
+        dialog.geometry("720x620")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
+
+        ctk.CTkLabel(
+            dialog,
+            text="🔑  Настройка GitHub-токена",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).pack(padx=24, pady=(20, 8), anchor="w")
+
+        ctk.CTkLabel(
+            dialog,
+            text=("Токен нужен для увеличения лимита GitHub API. "
+                  "Задача занимает ~3 минуты."),
+            font=ctk.CTkFont(size=12),
+            text_color=("gray45", "gray60"),
+        ).pack(padx=24, pady=(0, 12), anchor="w")
+
+        # Инструкция в скроллируемом текстовом поле
+        text = ctk.CTkTextbox(
+            dialog,
+            wrap="word",
+            font=ctk.CTkFont(size=12, family="Consolas"),
+            border_width=1,
+        )
+        text.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+
+        instructions = (
+            "ШАГ 1. Создаём токен на GitHub\n"
+            "──────────────────────────────────\n"
+            "1. Открой в браузере: https://github.com/settings/tokens\n"
+            "2. Нажми «Generate new token» → «Generate new token (classic)».\n"
+            "3. Note: напиши название, например ZapretManager.\n"
+            "4. Expiration: выбери «No expiration» (или 90 дней — как хочешь).\n"
+            "5. Scopes: поставь галочку только у [public_repo].\n"
+            "   (Если репозиторий приватный — [repo].)\n"
+            "6. Нажми «Generate token» внизу страницы.\n"
+            "7. Скопируй строку, начинающуюся с ghp_ — она показывается\n"
+            "   ТОЛЬКО ОДИН РАЗ. Если потеряешь — придётся создавать заново.\n"
+            "\n"
+            "ШАГ 2. Добавляем переменную окружения в Windows\n"
+            "──────────────────────────────────\n"
+            "1. Нажми Win и начни печатать: «Изменение переменных среды».\n"
+            "2. Открой «Изменение переменных среды текущего пользователя».\n"
+            "3. В верхнем блоке «Переменные среды пользователя» нажми «Создать».\n"
+            "4. Имя переменной:  GITHUB_TOKEN\n"
+            "5. Значение:        вставь свой токен (ghp_...)\n"
+            "6. Нажми «ОК» во всех окнах.\n"
+            "\n"
+            "ШАГ 3. Перезапуск\n"
+            "──────────────────────────────────\n"
+            "1. Полностью закрой Zapret Manager (не просто сверни окно).\n"
+            "2. Запусти его заново.\n"
+            "3. Зайди: Настройки → 🔑 GitHub токен.\n"
+            "4. Статус должен стать: «Настроен ✓  (лимит 5000 запросов/час)».\n"
+            "\n"
+            "ПРОВЕРКА\n"
+            "──────────────────────────────────\n"
+            "Можно открыть в браузере: https://api.github.com/rate_limit\n"
+            "С токеном ты увидишь \"limit\": 5000 в блоке \"core\".\n"
+            "\n"
+            "ВАЖНО\n"
+            "──────────────────────────────────\n"
+            "• Токен НЕ хранится в config.json и НЕ показывается в приложении.\n"
+            "• Токен лежит только в переменных окружения Windows.\n"
+            "• Если токен утечёт — сразу отзови его по ссылке:\n"
+            "  https://github.com/settings/tokens\n"
+            "• Для пользователей приложения: если тебе хватает 60 запросов/час,\n"
+            "  ничего настраивать не нужно — оставь как есть.\n"
+        )
+
+        text.insert("1.0", instructions)
+        text.configure(state="disabled")
+
+        # Кнопки
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=24, pady=(0, 20))
+
+        ctk.CTkButton(
+            btn_frame, text="Открыть страницу создания токена",
+            command=lambda: os.startfile("https://github.com/settings/tokens"),
+            width=280, height=36,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_frame, text="Закрыть",
+            command=dialog.destroy,
+            width=140, height=36,
+            fg_color=("gray75", "gray28"),
+            hover_color=("gray65", "gray35"),
+        ).pack(side="right")
 
     def _make_path_tile(self, parent, *, col, icon, title, subtitle, path, command) -> None:
         tile = ctk.CTkFrame(parent, corner_radius=10, fg_color=TILE_FG,

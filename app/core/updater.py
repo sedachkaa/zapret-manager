@@ -12,6 +12,13 @@
     - "exe" — прямой исполняемый файл (например, tg-ws-proxy) —
       просто скачивается и заменяет существующий файл.
 
+Авторизация GitHub API:
+    По умолчанию лимит — 60 запросов/час на IP. Если задана переменная
+    окружения GITHUB_TOKEN, лимит становится 5000/час.
+
+    Токен читается ТОЛЬКО из переменной окружения — в config.json его
+    нет, чтобы случайно не показать в GUI или не закоммитить в репозиторий.
+
 ВАЖНО: игнорируем автоматически прикреплённые GitHub-архивы
 "Source code (zip)" / "Source code (tar.gz)" — у них URL содержит
 /archive/, а у наших релизных ассетов — /releases/download/.
@@ -20,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import urllib.error
@@ -35,6 +43,9 @@ from app.core.config import PROJECT_ROOT, Config
 
 GITHUB_API = "https://api.github.com"
 USER_AGENT = "zapret-manager-updater/1.0"
+
+# Имя переменной окружения, в которой ищется токен.
+GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 
 
 # --- Структуры данных ---------------------------------------------------
@@ -54,7 +65,39 @@ class ReleaseInfo:
         return str(self.version)
 
 
-# --- Утилиты ------------------------------------------------------------
+# --- Токен GitHub --------------------------------------------------------
+
+def _get_github_token() -> str | None:
+    """
+    Возвращает GitHub-токен ТОЛЬКО из переменной окружения GITHUB_TOKEN.
+    Если переменная не задана — None (работаем анонимно, лимит 60/час).
+
+    Мы намеренно НЕ читаем токен из config.json: этот файл открывается
+    через GUI в настройках и легко может утечь.
+    """
+    token = os.environ.get(GITHUB_TOKEN_ENV, "").strip()
+    return token or None
+
+
+def has_github_token() -> bool:
+    """True, если GITHUB_TOKEN задан в переменных окружения."""
+    return _get_github_token() is not None
+
+
+def _auth_headers() -> dict[str, str]:
+    """Заголовки для GitHub API. С токеном — если он есть."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = _get_github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+# --- Утилиты версий ------------------------------------------------------
 
 def _normalize_version(tag: str) -> Version | None:
     cleaned = tag.lstrip("vV").strip()
@@ -87,15 +130,11 @@ def is_newer_than(current: str, candidate: str) -> bool:
     return cb > ca
 
 
+# --- HTTP ---------------------------------------------------------------
+
 def _http_get_json(url: str) -> dict:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": USER_AGENT,
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
+    """GET-запрос к GitHub API с авторизацией (если есть токен)."""
+    req = urllib.request.Request(url, headers=_auth_headers())
     with urllib.request.urlopen(req, timeout=15) as resp:
         raw = resp.read().decode("utf-8")
     return json.loads(raw)
@@ -109,18 +148,13 @@ def _is_source_archive(url: str) -> bool:
 def _pick_asset(assets: list[dict]) -> tuple[str | None, str | None, str | None]:
     """
     Выбирает подходящий ассет из списка релиза.
-
-    Приоритет:
-        1. installer — *.exe, содержащий "setup" в имени (наш инсталлятор).
-        2. zip       — обычный .zip (zapret-discord-youtube).
-        3. exe       — остальные .exe, предпочитая "windows" (tg-ws-proxy).
-
+    Приоритет: installer > zip > exe (windows > остальные).
     Игнорирует авто-архивы Source code.
     """
     def _valid(a: dict) -> bool:
         return not _is_source_archive(a.get("browser_download_url", "") or "")
 
-    # 1. Installer (наши ZapretManager-Setup-*.exe)
+    # 1. Installer (ZapretManager-Setup-*.exe)
     for asset in assets:
         if not _valid(asset):
             continue
@@ -137,7 +171,7 @@ def _pick_asset(assets: list[dict]) -> tuple[str | None, str | None, str | None]
         if name.lower().endswith(".zip"):
             return (asset.get("browser_download_url"), name, "zip")
 
-    # 3. Прочие exe (windows > остальные)
+    # 3. Прочие exe
     exe_assets = [a for a in assets if _valid(a) and a.get("name", "").lower().endswith(".exe")]
     for asset in exe_assets:
         if "windows" in asset.get("name", "").lower():
@@ -152,6 +186,10 @@ def _pick_asset(assets: list[dict]) -> tuple[str | None, str | None, str | None]
 # --- Публичные функции --------------------------------------------------
 
 def fetch_latest_release(owner_repo: str, *, include_prerelease: bool = False) -> ReleaseInfo | None:
+    """
+    Возвращает информацию о последнем релизе репозитория {owner}/{name}.
+    При 403 (rate limit) и 404 (не найдено) — None, без исключения.
+    """
     url = f"{GITHUB_API}/repos/{owner_repo}/releases/latest"
     if include_prerelease:
         url = f"{GITHUB_API}/repos/{owner_repo}/releases"
@@ -161,7 +199,20 @@ def fetch_latest_release(owner_repo: str, *, include_prerelease: bool = False) -
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
+        if e.code == 403:
+            has_token = has_github_token()
+            hint = (
+                "Токен не указан — лимит 60 запросов/час на IP. "
+                "Задай GITHUB_TOKEN, чтобы увеличить лимит до 5000/час."
+                if not has_token else
+                "Токен указан, но лимит исчерпан — проверь токен."
+            )
+            print(f"[updater] GitHub rate limit для {owner_repo}. {hint}")
+            return None
         raise
+    except Exception as e:
+        print(f"[updater] ошибка запроса к GitHub для {owner_repo}: {e}")
+        return None
 
     if include_prerelease:
         if not isinstance(data, list) or not data:
@@ -201,7 +252,13 @@ def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
     progress_cb(percent: float) — необязательный callback для прогресса.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+    headers = {"User-Agent": USER_AGENT}
+    token = _get_github_token()
+    if token and "github" in url.lower():
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=120) as resp:
         total = int(resp.headers.get("Content-Length", 0) or 0)
         chunk = 64 * 1024
@@ -353,6 +410,8 @@ def check_tgproxy_update(cfg: Config) -> ReleaseInfo | None:
 # --- Быстрый тест --------------------------------------------------------
 
 if __name__ == "__main__":
+    print(f"Токен ({GITHUB_TOKEN_ENV}): {'настроен' if has_github_token() else 'НЕ настроен (лимит 60/час)'}")
+    print()
     print("Проверяю релизы...")
     for repo in ("Flowseal/zapret-discord-youtube", "Flowseal/tg-ws-proxy"):
         try:
