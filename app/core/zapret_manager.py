@@ -9,7 +9,7 @@ Standalone запускает winws.exe с аргументами из:
 
 Умные кнопки:
     start_smart()    — сам решает, что делать (служба/установка/запуск);
-    stop_smart()     — останавливает то, что работает;
+    stop_smart()     — жёстко гасит ВСЁ, что связано с zapret;
     restart_smart()  — стоп + старт.
 
 Все системные вызовы (sc, netsh, tasklist) обрабатывают как
@@ -167,7 +167,6 @@ def _sc_query_status(service: str) -> Optional[str]:
         if m:
             return m.group(1).upper()
 
-    # Фолбэк — ищем ключевые слова состояний по всему выводу
     upper = out.upper()
     for state in ("RUNNING", "STOPPED", "START_PENDING", "STOP_PENDING",
                   "PAUSED", "PAUSE_PENDING", "CONTINUE_PENDING"):
@@ -226,14 +225,39 @@ def _parse_imagepath(image_path: str) -> tuple[str, list[str]]:
             return s, []
         exe = s[:sp]
         rest = s[sp + 1:].strip()
-    tokens = re.findall(r'"[^"]*"|\S+', rest)
-    args = [t.strip('"') for t in tokens if t.strip()]
-    return exe, args
+    return exe, _tokenize_args(rest)
 
 
 def _tokenize_args(s: str) -> list[str]:
-    tokens = re.findall(r'"[^"]*"|\S+', s)
-    return [t.strip('"') for t in tokens if t.strip() and t != '"']
+    """
+    Разбирает строку аргументов winws.exe, снимая кавычки так же,
+    как это делает cmd.exe.
+
+    Прежний подход через re.findall(r'"[^"]*"|\\S+') работал
+    только для путей без пробелов. Для строк вида
+        --hostlist="C:\\path\\file.txt" --new
+    он выдавал
+        ['--hostlist="C:\\path\\file.txt', '--new']
+    (внутренняя открывающая кавычка оставалась, winws.exe падал с 1067).
+
+    Этот парсер обрабатывает кавычки корректно.
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    in_quote = False
+    for ch in s:
+        if ch == '"':
+            in_quote = not in_quote
+            continue
+        if ch in (" ", "\t") and not in_quote:
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        current.append(ch)
+    if current:
+        tokens.append("".join(current))
+    return [t for t in tokens if t]
 
 
 # --- Менеджер ------------------------------------------------------------
@@ -358,7 +382,6 @@ class ZapretManager:
                 print(f"[zapret] start_smart: служба с нужной стратегией, sc start")
                 _run(["sc", "start", SERVICE_NAME], timeout=25)
 
-                # Ждём RUNNING до 10 сек
                 deadline = time.time() + 10.0
                 state = None
                 while time.time() < deadline:
@@ -383,19 +406,55 @@ class ZapretManager:
         return self.install_service(strategy_bat)
 
     def stop_smart(self) -> ZapretResult:
-        if self.is_our_process():
-            return self.stop_standalone()
+        """
+        Останавливает ВСЁ, что связано с zapret:
+            - наш standalone winws.exe (если был запущен через Popen);
+            - службу zapret;
+            - службы WinDivert и WinDivert14;
+            - любые процессы winws.exe (внешние/зависшие).
 
-        if self.is_service_running():
-            return self._stop_service_only()
+        НЕ трогает tg-ws-proxy — это отдельный сервис.
+        """
+        lines: list[str] = []
 
+        # 1. Наш standalone-процесс
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=3)
+                lines.append("standalone winws остановлен")
+            except Exception:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2)
+                    lines.append("standalone winws убит")
+                except Exception as e:
+                    print(f"[zapret] terminate/kill failed: {e}")
+            self._proc = None
+        self._strategy_name = ""
+
+        # 2. Служба zapret
+        if _sc_query_status(SERVICE_NAME) is not None:
+            _run(["net", "stop", SERVICE_NAME], timeout=25)
+            lines.append("служба zapret остановлена")
+
+        # 3. WinDivert и WinDivert14
+        for name in ("WinDivert", "WinDivert14"):
+            if _sc_query_status(name) is not None:
+                _run(["net", "stop", name], timeout=15)
+                lines.append(f"служба {name} остановлена")
+
+        # 4. Все winws.exe — свои и внешние
         if _tasklist_has("winws.exe"):
             _run(["taskkill", "/IM", "winws.exe", "/F"], timeout=10)
-            self._proc = None
-            self._strategy_name = ""
-            return ZapretResult("stop", True, "внешний winws.exe остановлен")
+            lines.append("winws.exe остановлен")
 
-        return ZapretResult("stop", True, "не был запущен")
+        # Небольшая пауза, чтобы Windows освободил ресурсы
+        time.sleep(0.5)
+
+        if not lines:
+            return ZapretResult("stop", True, "нечего останавливать")
+        return ZapretResult("stop", True, "; ".join(lines))
 
     def restart_smart(self, strategy_bat: Path) -> ZapretResult:
         self.stop_smart()
@@ -419,7 +478,6 @@ class ZapretManager:
         else:
             lines.append("winws.exe: не запущен ✗")
 
-        # Драйвер WinDivert (kernel-driver)
         rc, out, _ = _run(["driverquery", "/FO", "CSV", "/NH"], timeout=10)
         if rc == 0:
             for line in out.splitlines():
@@ -430,7 +488,6 @@ class ZapretManager:
                     lines.append(f'Драйвер WinDivert загружен: "{name}","{name}","Kernel ","{date}"')
                     break
 
-        # Процессы-обходчики
         procs = _list_bypass_processes()
         if procs:
             joined = "; ".join(f"{n} (PID {pid})" for n, pid in procs)
@@ -640,7 +697,6 @@ class ZapretManager:
 
         rc, out, err = _run(["sc", "start", SERVICE_NAME], timeout=25)
 
-        # Ждём RUNNING до 10 сек
         deadline = time.time() + 10.0
         state: Optional[str] = None
         while time.time() < deadline:
@@ -650,7 +706,6 @@ class ZapretManager:
             time.sleep(0.5)
 
         if state != "RUNNING":
-            # Служба НЕ удаляется — возможно, она ещё стартует.
             _, query_out, _ = _run(["sc", "query", SERVICE_NAME], timeout=5)
             return ZapretResult(
                 "install", False,
@@ -1110,14 +1165,10 @@ class ZapretManager:
             return {"exists": 1, "lines": non_empty, "size": target.stat().st_size}
         except OSError:
             return {"exists": 0, "lines": 0, "size": 0}
-        # ---- Фирменный список --------------------------------------------
+
+    # ---- Фирменный список --------------------------------------------
 
     def get_bundled_list_info(self, asset_name: str = "list-general.txt") -> dict[str, int]:
-        """
-        Информация о встроенном фирменном списке (в app/assets/).
-        Возвращает dict со статусом файла.
-        """
-        from app.core.config import get_asset_path
         source = get_asset_path(asset_name)
         if not source.exists():
             return {"exists": 0, "lines": 0, "size": 0}
@@ -1136,10 +1187,6 @@ class ZapretManager:
             return {"exists": 0, "lines": 0, "size": 0}
 
     def open_bundled_list(self, asset_name: str = "list-general.txt") -> bool:
-        """
-        Открывает встроенный фирменный список в блокноте (только для просмотра).
-        """
-        from app.core.config import get_asset_path
         source = get_asset_path(asset_name)
         if not source.exists():
             return False
@@ -1150,15 +1197,6 @@ class ZapretManager:
             return False
 
     def install_bundled_list(self, asset_name: str = "list-general.txt") -> ZapretResult:
-        """
-        Устанавливает встроенный фирменный список как активный
-        zapret/lists/list-general.txt.
-
-        Текущий список сохраняется в list-general.txt.backup,
-        чтобы можно было откатиться.
-        """
-        from app.core.config import get_asset_path
-
         source = get_asset_path(asset_name)
         if not source.exists():
             return ZapretResult(
@@ -1173,16 +1211,13 @@ class ZapretManager:
         try:
             self.lists_dir.mkdir(parents=True, exist_ok=True)
 
-            # Бэкап текущего списка
             backup_msg = ""
             if target.exists():
                 shutil.copy2(target, backup)
                 backup_msg = f" Текущий список сохранён в {backup.name}."
 
-            # Копируем новый
             shutil.copy2(source, target)
 
-            # Считаем домены
             data = target.read_text(encoding="utf-8", errors="replace")
             lines = sum(
                 1 for line in data.splitlines()

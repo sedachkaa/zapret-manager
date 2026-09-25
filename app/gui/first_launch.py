@@ -6,10 +6,14 @@
 
 Что делает:
     1. Скачивает последний релиз zapret-discord-youtube.
-    2. Устанавливает службу zapret с дефолтной стратегией.
-    3. Скачивает tg-ws-proxy.
-    4. Сохраняет флаг first_launch_done = true.
-    5. Перезапускает приложение.
+    2. Скачивает tg-ws-proxy.
+    3. Сохраняет флаг first_launch_done = true.
+    4. Перезапускает приложение.
+
+Служба zapret здесь НЕ устанавливается — это делает пользователь
+вручную через вкладку Zapret после того, как выберет нужную
+стратегию из списка (после перезапуска список .bat-файлов будет
+заполнен свежими стратегиями).
 
 Если на каком-то шаге ошибка — показывает её и предлагает
 повторить или пропустить (тогда флаг всё равно ставится,
@@ -24,7 +28,6 @@ import sys
 import threading
 from dataclasses import dataclass
 from tkinter import messagebox
-from typing import Callable
 
 import customtkinter as ctk
 
@@ -59,7 +62,6 @@ def restart_app(delay_seconds: int = 2) -> None:
         exe = sys.executable
         args = ["-m", "app.main"] + sys.argv[1:]
 
-    # Собираем команду
     cmd_parts = [f'"{exe}"']
     for a in args:
         if " " in a or "\t" in a:
@@ -68,8 +70,6 @@ def restart_app(delay_seconds: int = 2) -> None:
             cmd_parts.append(a)
     cmd = " ".join(cmd_parts)
 
-    # Отложенный запуск через cmd: наш процесс успеет завершиться,
-    # а затем новый стартует в свежей оболочке.
     full = f'cmd /c "timeout /t {delay_seconds} /nobreak >nul & start "" {cmd}"'
 
     try:
@@ -98,7 +98,6 @@ class Step:
 
 STEPS: list[Step] = [
     Step("download_zapret", "Скачать zapret-discord-youtube", "⬇️"),
-    Step("install_service", "Установить службу zapret (general)", "🛡"),
     Step("download_tgproxy", "Скачать tg-ws-proxy", "✈️"),
 ]
 
@@ -124,27 +123,25 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         self.tgproxy = tgproxy
 
         self.title("Zapret Manager — первый запуск")
-        self.geometry("620x560")
+        self.geometry("620x520")
         self.resizable(False, False)
 
-        # Модальное окно
         self.transient(master)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close_attempt)
         self.lift()
         self.focus_force()
 
-        # Состояние
         self._step_statuses: dict[str, str] = {s.key: "pending" for s in STEPS}
         self._current_step: str = ""
         self._lock_actions = False
+        self._any_success = False
 
         self._build_ui()
 
     # --- UI ------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # Заголовок
         header = ctk.CTkFrame(self, height=64, corner_radius=0)
         header.pack(fill="x")
         ctk.CTkLabel(
@@ -153,18 +150,17 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         ).pack(padx=24, pady=(16, 4), anchor="w")
         ctk.CTkLabel(
             header,
-            text="Установим компоненты, которые нужны для работы приложения.",
+            text="Скачаем компоненты, которые нужны для работы приложения.",
             font=ctk.CTkFont(size=12),
             text_color=("gray45", "gray60"),
         ).pack(padx=24, pady=(0, 12), anchor="w")
 
-        # Карточка шагов
         body = ctk.CTkFrame(self, corner_radius=10,
                             fg_color=CARD_FG, border_width=1, border_color=CARD_BORDER)
         body.pack(fill="x", padx=20, pady=(0, 12))
 
         ctk.CTkLabel(
-            body, text="Будет установлено:",
+            body, text="Будет скачано:",
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(padx=16, pady=(14, 8), anchor="w")
 
@@ -191,7 +187,6 @@ class FirstLaunchDialog(ctk.CTkToplevel):
 
             self._step_widgets[step.key] = (status_icon, title_label)
 
-        # Прогресс-бар и статус
         progress_frame = ctk.CTkFrame(self, fg_color="transparent")
         progress_frame.pack(fill="x", padx=20, pady=(0, 8))
 
@@ -206,7 +201,6 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         )
         self._status_label.pack(fill="x")
 
-        # Кнопки
         buttons = ctk.CTkFrame(self, fg_color="transparent")
         buttons.pack(fill="x", padx=20, pady=(8, 20))
 
@@ -220,7 +214,7 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         self._skip_button.pack(side="left")
 
         self._install_button = ctk.CTkButton(
-            buttons, text="⬇  Установить",
+            buttons, text="⬇  Скачать",
             command=self._on_install,
             width=220, height=40,
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -230,22 +224,23 @@ class FirstLaunchDialog(ctk.CTkToplevel):
     # --- Обработчики кнопок --------------------------------------------
 
     def _on_close_attempt(self) -> None:
-        """Крестик: если установка идёт — не закрываем. Иначе — пропустить."""
         if self._lock_actions:
             return
         self._on_skip()
 
     def _on_skip(self) -> None:
-        """Пользователь отказался от установки. Ставим флаг и закрываем окно."""
         if self._lock_actions:
             return
         self.cfg.set("first_launch_done", True)
         self.cfg.save()
         self.grab_release()
         self.destroy()
+        # Если что-то уже скачалось — нужно перезапустить,
+        # чтобы список стратегий в главном окне подтянулся свежий.
+        if self._any_success:
+            restart_app(delay_seconds=2)
 
     def _on_install(self) -> None:
-        """Запуск установки в фоновом потоке."""
         if self._lock_actions:
             return
 
@@ -259,7 +254,6 @@ class FirstLaunchDialog(ctk.CTkToplevel):
     # --- Установка -----------------------------------------------------
 
     def _run_all_steps(self) -> None:
-        """Проходит по всем шагам последовательно."""
         total = len(STEPS)
         for i, step in enumerate(STEPS):
             self.after(0, lambda s=step: self._mark_running(s.key))
@@ -269,25 +263,22 @@ class FirstLaunchDialog(ctk.CTkToplevel):
             self.after(0, lambda s=step, ok=ok, msg=message:
                        self._mark_done(s.key, ok, msg))
 
+            if ok:
+                self._any_success = True
+
             if not ok:
-                # Ошибка — показываем и останавливаемся.
                 self.after(0, lambda s=step, msg=message: self._show_error(s, msg))
                 return
 
-            # Прогресс-бар
             progress = (i + 1) / total
             self.after(0, lambda p=progress: self._progress.set(p))
 
-        # Всё готово
         self.after(0, self._on_success)
 
     def _execute_step(self, key: str) -> tuple[bool, str]:
-        """Выполняет один шаг. Возвращает (успех, сообщение)."""
         try:
             if key == "download_zapret":
                 return self._step_download_zapret()
-            if key == "install_service":
-                return self._step_install_service()
             if key == "download_tgproxy":
                 return self._step_download_tgproxy()
         except Exception as e:
@@ -299,7 +290,6 @@ class FirstLaunchDialog(ctk.CTkToplevel):
     # --- Реализация шагов ----------------------------------------------
 
     def _step_download_zapret(self) -> tuple[bool, str]:
-        # Если уже установлено — ничего не качаем
         if self.zapret.is_installed():
             return (True, "zapret уже установлен")
 
@@ -313,29 +303,6 @@ class FirstLaunchDialog(ctk.CTkToplevel):
             excludes=self.cfg.exclude_from_update,
         )
         return (True, f"zapret {release.tag} — скачано {written} файлов")
-
-    def _step_install_service(self) -> tuple[bool, str]:
-        # Если служба уже работает — пропускаем
-        if self.zapret.is_service_running():
-            return (True, "служба zapret уже работает")
-
-        strategies = self.zapret.list_strategies()
-        if not strategies:
-            return (False, "Не найдены .bat-стратегии — возможно, zapret не скачался")
-
-        # Ищем general.bat без суффиксов
-        strategy_bat = None
-        for s in strategies:
-            if s.stem.lower() == "general":
-                strategy_bat = s
-                break
-        if strategy_bat is None:
-            strategy_bat = strategies[0]
-
-        res = self.zapret.install_service(strategy_bat)
-        if not res.ok:
-            return (False, res.message)
-        return (True, f"служба zapret запущена со стратегией {strategy_bat.stem}")
 
     def _step_download_tgproxy(self) -> tuple[bool, str]:
         if self.tgproxy.is_installed():
@@ -382,17 +349,16 @@ class FirstLaunchDialog(ctk.CTkToplevel):
     def _on_success(self) -> None:
         self._progress.set(1.0)
         self._status_label.configure(
-            text="Всё установлено! Перезапуск приложения через пару секунд…",
+            text="Всё скачано! Перезапуск приложения через пару секунд…",
             text_color=STATUS_OK,
         )
 
-        # Убираем кнопки — они больше не нужны
         self._install_button.pack_forget()
         self._skip_button.pack_forget()
 
-        # Ставим флаг, что мастер пройден
         self.cfg.set("first_launch_done", True)
         self.cfg.save()
 
-        # Перезапуск
+        # Перезапуск приложения, чтобы список стратегий в главном окне
+        # сформировался уже с учётом свежескачанных .bat-файлов.
         self.after(2000, lambda: restart_app(delay_seconds=2))

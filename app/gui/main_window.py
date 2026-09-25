@@ -99,8 +99,6 @@ class MainWindow(ctk.CTk):
         self.log("updates", f"Версия: {APP_VERSION}, frozen: {self_updater.is_supported()}")
 
         self.after(300, self._auto_refresh)
-        # Мастер первого запуска показывается через 800 мс после старта —
-        # раньше автопроверки обновления обёртки, чтобы не пересекались диалоги.
         self.after(800, self._check_first_launch)
         self.after(2000, self._check_wrapper_update_on_start)
 
@@ -391,6 +389,27 @@ class MainWindow(ctk.CTk):
         self.cfg.save()
         self.set_status(f"Стратегия сохранена: {value}")
 
+    def _refresh_strategies_menu(self) -> None:
+        """
+        Перечитывает список .bat-стратегий в папке zapret и обновляет
+        выпадающее меню. Полезно после установки/обновления zapret,
+        когда появляются новые .bat-файлы.
+        """
+        try:
+            strategies = [p.stem for p in self.zapret.list_strategies()]
+            current = self.strategy_var.get()
+
+            self.strategy_menu.configure(values=strategies or ["—"])
+
+            if current not in strategies:
+                last = self.cfg.last_strategy
+                if last and last in strategies:
+                    self.strategy_var.set(last)
+                else:
+                    self.strategy_var.set(strategies[0] if strategies else "—")
+        except Exception as e:
+            print(f"[gui] не удалось обновить список стратегий: {e}")
+
     def _refresh_zapret_status(self) -> None:
         if not self.zapret.is_installed():
             if self._last_zapret_text != "not_installed":
@@ -564,6 +583,7 @@ class MainWindow(ctk.CTk):
         self._refresh_zapret_status()
         self._refresh_zapret_toggles()
         self._refresh_fake_menu()
+        self._refresh_strategies_menu()
         self.set_status("Готово")
 
     # ============================================================
@@ -866,6 +886,7 @@ class MainWindow(ctk.CTk):
             self.update_cards["zapret"]["status_label"].configure(
                 text="○  Обновлено, требуется переустановка службы",
                 text_color=STATUS_WARN)
+            self._refresh_strategies_menu()
         elif key == "tgproxy":
             self.tgproxy.clear_version_cache()
             new_ver = self.tgproxy.get_version() or "—"
@@ -915,6 +936,7 @@ class MainWindow(ctk.CTk):
         self.tgproxy.clear_version_cache()
         self.update_cards["tgproxy"]["current_label"].configure(
             text=self.tgproxy.get_version() or "—")
+        self._refresh_strategies_menu()
         self.set_status("Готово")
 
     # ============================================================
@@ -926,15 +948,12 @@ class MainWindow(ctk.CTk):
         Показывает мастер первого запуска, если это первый старт собранного
         приложения и компоненты ещё не установлены.
         """
-        # Из исходников мастер не показываем — это для конечных пользователей.
         if not self_updater.is_supported():
             return
 
         if self.cfg.get("first_launch_done", False):
             return
 
-        # Если всё уже установлено (например, пользователь обновился
-        # с версии, где мастера не было) — не мучаем его диалогом.
         try:
             zapret_ok = self.zapret.is_installed() and self.zapret.is_service_running()
             tgproxy_ok = self.tgproxy.is_installed()
@@ -946,14 +965,12 @@ class MainWindow(ctk.CTk):
         except Exception as e:
             print(f"[first_launch] ошибка проверки: {e}")
 
-        # Показываем мастер
         try:
             from app.gui.first_launch import FirstLaunchDialog
             FirstLaunchDialog(self, self.cfg, self.zapret, self.tgproxy)
             self.log("updates", "🚀 Открыт мастер первого запуска")
         except Exception as e:
             self.log("updates", f"✗ Не удалось открыть мастер первого запуска: {e}")
-            # Чтобы не пытаться снова и снова — ставим флаг
             self.cfg.set("first_launch_done", True)
             self.cfg.save()
 
