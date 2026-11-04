@@ -1,19 +1,5 @@
 """
 Нативное управление zapret-discord-youtube.
-
-Standalone запускает winws.exe с аргументами из:
-    1) ImagePath установленной службы (самый надёжный);
-    2) парсинга .bat стратегии с поддержкой set "VAR=value",
-       многострочных команд через ^, %~dp0, %BIN%, %LISTS%,
-       %GameFilterTCP% / %GameFilterUDP%.
-
-Умные кнопки:
-    start_smart()    — сам решает, что делать (служба/установка/запуск);
-    stop_smart()     — жёстко гасит ВСЁ, что связано с zapret;
-    restart_smart()  — стоп + старт.
-
-Все системные вызовы (sc, netsh, tasklist) обрабатывают как
-английскую, так и русскую локали Windows.
 """
 
 from __future__ import annotations
@@ -43,8 +29,6 @@ USER_AGENT = "zapret-manager/1.0"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
-# --- Результат операции --------------------------------------------------
-
 @dataclass
 class ZapretResult:
     action: str
@@ -59,8 +43,6 @@ class ZapretResult:
             s += f": {self.message}"
         return s
 
-
-# --- Утилиты -------------------------------------------------------------
 
 def is_admin() -> bool:
     try:
@@ -116,9 +98,6 @@ def _tasklist_pid(image_name: str) -> Optional[int]:
 
 
 def _list_bypass_processes() -> list[tuple[str, int]]:
-    """
-    Возвращает список (имя_процесса, PID) для известных процессов-обходчиков.
-    """
     targets = {
         "winws.exe", "zapretmanager.exe",
         "goodbyedpi.exe", "goodbye_dpi.exe",
@@ -145,11 +124,6 @@ def _list_bypass_processes() -> list[tuple[str, int]]:
 
 
 def _sc_query_status(service: str) -> Optional[str]:
-    """
-    Возвращает 'RUNNING', 'STOPPED', 'STOP_PENDING', 'START_PENDING' и т.п.,
-    либо None. Поддерживает английскую (STATE) и русскую (Состояние) локали
-    Windows, плюс несколько других распространённых языков.
-    """
     rc, out, _ = _run(["sc", "query", service], timeout=5)
     if rc != 0:
         return None
@@ -176,10 +150,6 @@ def _sc_query_status(service: str) -> Optional[str]:
 
 
 def _tcp_timestamps_enabled() -> bool:
-    """
-    Проверяет, включены ли TCP timestamps.
-    На англ. Windows строка 'timestamps', на русской — 'Отметки времени RFC 1323'.
-    """
     rc, out, _ = _run(["netsh", "interface", "tcp", "show", "global"], timeout=10)
     if rc != 0:
         return False
@@ -229,19 +199,6 @@ def _parse_imagepath(image_path: str) -> tuple[str, list[str]]:
 
 
 def _tokenize_args(s: str) -> list[str]:
-    """
-    Разбирает строку аргументов winws.exe, снимая кавычки так же,
-    как это делает cmd.exe.
-
-    Прежний подход через re.findall(r'"[^"]*"|\\S+') работал
-    только для путей без пробелов. Для строк вида
-        --hostlist="C:\\path\\file.txt" --new
-    он выдавал
-        ['--hostlist="C:\\path\\file.txt', '--new']
-    (внутренняя открывающая кавычка оставалась, winws.exe падал с 1067).
-
-    Этот парсер обрабатывает кавычки корректно.
-    """
     tokens: list[str] = []
     current: list[str] = []
     in_quote = False
@@ -260,15 +217,11 @@ def _tokenize_args(s: str) -> list[str]:
     return [t for t in tokens if t]
 
 
-# --- Менеджер ------------------------------------------------------------
-
 class ZapretManager:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self._proc: subprocess.Popen | None = None
         self._strategy_name: str = ""
-
-    # --- Пути ----------------------------------------------------------
 
     @property
     def zapret_dir(self) -> Path:
@@ -305,8 +258,6 @@ class ZapretManager:
     @property
     def check_updates_flag(self) -> Path:
         return self.utils_dir / "check_updates.enabled"
-
-    # --- Проверки ------------------------------------------------------
 
     def is_installed(self) -> bool:
         return self.winws_path.exists() and self.bin_dir.exists()
@@ -360,10 +311,6 @@ class ZapretManager:
                     return m.group(1).strip()
         return ""
 
-    # ================================================================
-    #  Умные кнопки
-    # ================================================================
-
     def start_smart(self, strategy_bat: Path) -> ZapretResult:
         if not is_admin():
             return ZapretResult("start", False, "нужны права администратора")
@@ -379,9 +326,7 @@ class ZapretManager:
         if self.is_service_installed():
             current_strat = self.get_active_strategy_name()
             if current_strat == strategy_bat.stem:
-                print(f"[zapret] start_smart: служба с нужной стратегией, sc start")
                 _run(["sc", "start", SERVICE_NAME], timeout=25)
-
                 deadline = time.time() + 10.0
                 state = None
                 while time.time() < deadline:
@@ -391,33 +336,15 @@ class ZapretManager:
                     time.sleep(0.5)
 
                 if state == "RUNNING":
-                    return ZapretResult("start", True,
-                                        f"служба zapret запущена (стратегия: {current_strat})")
-                return ZapretResult(
-                    "start", False,
-                    f"служба не перешла в RUNNING за 10 сек (текущее: {state})",
-                    "Нажмите 'Check Status' через 10 секунд.",
-                )
+                    return ZapretResult("start", True, f"служба zapret запущена (стратегия: {current_strat})")
+                return ZapretResult("start", False, f"служба не перешла в RUNNING за 10 сек (текущее: {state})", "Нажмите 'Check Status' через 10 секунд.")
 
-            print(f"[zapret] start_smart: стратегия изменилась ({current_strat} → {strategy_bat.stem})")
             return self.install_service(strategy_bat)
 
-        print(f"[zapret] start_smart: служба не установлена, ставлю {strategy_bat.stem}")
         return self.install_service(strategy_bat)
 
     def stop_smart(self) -> ZapretResult:
-        """
-        Останавливает ВСЁ, что связано с zapret:
-            - наш standalone winws.exe (если был запущен через Popen);
-            - службу zapret;
-            - службы WinDivert и WinDivert14;
-            - любые процессы winws.exe (внешние/зависшие).
-
-        НЕ трогает tg-ws-proxy — это отдельный сервис.
-        """
         lines: list[str] = []
-
-        # 1. Наш standalone-процесс
         if self._proc is not None and self._proc.poll() is None:
             try:
                 self._proc.terminate()
@@ -428,30 +355,25 @@ class ZapretManager:
                     self._proc.kill()
                     self._proc.wait(timeout=2)
                     lines.append("standalone winws убит")
-                except Exception as e:
-                    print(f"[zapret] terminate/kill failed: {e}")
+                except Exception:
+                    pass
             self._proc = None
         self._strategy_name = ""
 
-        # 2. Служба zapret
         if _sc_query_status(SERVICE_NAME) is not None:
             _run(["net", "stop", SERVICE_NAME], timeout=25)
             lines.append("служба zapret остановлена")
 
-        # 3. WinDivert и WinDivert14
         for name in ("WinDivert", "WinDivert14"):
             if _sc_query_status(name) is not None:
                 _run(["net", "stop", name], timeout=15)
                 lines.append(f"служба {name} остановлена")
 
-        # 4. Все winws.exe — свои и внешние
         if _tasklist_has("winws.exe"):
             _run(["taskkill", "/IM", "winws.exe", "/F"], timeout=10)
             lines.append("winws.exe остановлен")
 
-        # Небольшая пауза, чтобы Windows освободил ресурсы
         time.sleep(0.5)
-
         if not lines:
             return ZapretResult("stop", True, "нечего останавливать")
         return ZapretResult("stop", True, "; ".join(lines))
@@ -460,10 +382,6 @@ class ZapretManager:
         self.stop_smart()
         time.sleep(0.8)
         return self.start_smart(strategy_bat)
-
-    # ================================================================
-    #  Служба — статус
-    # ================================================================
 
     def get_service_status(self) -> ZapretResult:
         lines: list[str] = []
@@ -514,8 +432,6 @@ class ZapretManager:
         if rc == 0:
             return ZapretResult("tcp", True, "включены")
         return ZapretResult("tcp", False, "не удалось включить", err)
-
-    # ---- Парсинг стратегий -------------------------------------------
 
     def list_strategies(self) -> list[Path]:
         if not self.zapret_dir.exists():
@@ -622,8 +538,6 @@ class ZapretManager:
                 return tokens
         return None
 
-    # ---- ImagePath из реестра ----------------------------------------
-
     def _get_service_image_path(self) -> Optional[str]:
         rc, out, _ = _run([
             "reg", "query",
@@ -644,8 +558,6 @@ class ZapretManager:
             print(f"[zapret] ImagePath exe не winws.exe: {exe}")
         return args or None
 
-    # ---- Install / Remove --------------------------------------------
-
     def install_service(self, strategy_bat: Path) -> ZapretResult:
         if not is_admin():
             return ZapretResult("install", False, "нужны права администратора")
@@ -654,46 +566,27 @@ class ZapretManager:
 
         args = self._parse_strategy_bat(strategy_bat)
         if not args:
-            return ZapretResult("install", False,
-                                f"не удалось распарсить {strategy_bat.name}",
-                                "проверьте, что в файле есть строка с winws.exe")
+            return ZapretResult("install", False, f"не удалось распарсить {strategy_bat.name}", "проверьте, что в файле есть строка с winws.exe")
 
         winws = str(self.winws_path)
         args_joined = " ".join(f'"{a}"' if " " in a else a for a in args)
         image_path = f'"{winws}" {args_joined}'
-
-        print(f"[zapret] ImagePath = {image_path}")
 
         _run(["net", "stop", SERVICE_NAME], timeout=20)
         _run(["sc", "delete", SERVICE_NAME], timeout=15)
         _run(["taskkill", "/IM", "winws.exe", "/F"], timeout=10)
         time.sleep(0.5)
 
-        rc, out, err = _run(
-            ["sc", "create", SERVICE_NAME,
-             "binPath=", "placeholder.exe",
-             "DisplayName=", "zapret",
-             "start=", "auto"],
-            timeout=20,
-        )
+        rc, out, err = _run(["sc", "create", SERVICE_NAME, "binPath=", "placeholder.exe", "DisplayName=", "zapret", "start=", "auto"], timeout=20)
         if rc != 0:
             return ZapretResult("install", False, "sc create failed", err or out)
 
-        rc, out, err = _run([
-            "reg", "add",
-            rf"HKLM\SYSTEM\CurrentControlSet\Services\{SERVICE_NAME}",
-            "/v", "ImagePath", "/t", "REG_SZ", "/d", image_path, "/f",
-        ], timeout=10)
+        rc, out, err = _run(["reg", "add", rf"HKLM\SYSTEM\CurrentControlSet\Services\{SERVICE_NAME}", "/v", "ImagePath", "/t", "REG_SZ", "/d", image_path, "/f"], timeout=10)
         if rc != 0:
             return ZapretResult("install", False, "reg add ImagePath failed", err or out)
 
         _run(["sc", "description", SERVICE_NAME, "Zapret DPI bypass software"], timeout=10)
-        _run([
-            "reg", "add",
-            rf"HKLM\System\CurrentControlSet\Services\{SERVICE_NAME}",
-            "/v", "zapret-discord-youtube", "/t", "REG_SZ",
-            "/d", strategy_bat.stem, "/f",
-        ], timeout=10)
+        _run(["reg", "add", rf"HKLM\System\CurrentControlSet\Services\{SERVICE_NAME}", "/v", "zapret-discord-youtube", "/t", "REG_SZ", "/d", strategy_bat.stem, "/f"], timeout=10)
 
         rc, out, err = _run(["sc", "start", SERVICE_NAME], timeout=25)
 
@@ -707,19 +600,9 @@ class ZapretManager:
 
         if state != "RUNNING":
             _, query_out, _ = _run(["sc", "query", SERVICE_NAME], timeout=5)
-            return ZapretResult(
-                "install", False,
-                f"служба не перешла в RUNNING за 10 сек (текущее состояние: {state})",
-                f"ImagePath: {image_path}\n\n"
-                f"sc query:\n{query_out}\n\n"
-                f"sc start stderr: {(err or out).strip()}\n\n"
-                f"Служба оставлена в системе — нажмите 'Check Status' через 10 секунд.",
-            )
+            return ZapretResult("install", False, f"служба не перешла в RUNNING за 10 сек (текущее состояние: {state})", f"ImagePath: {image_path}\n\nsc query:\n{query_out}\n\nsc start stderr: {(err or out).strip()}")
 
-        return ZapretResult(
-            "install", True,
-            f"служба установлена со стратегией {strategy_bat.stem}",
-        )
+        return ZapretResult("install", True, f"служба установлена со стратегией {strategy_bat.stem}")
 
     def remove_service(self) -> ZapretResult:
         if not is_admin():
@@ -749,10 +632,6 @@ class ZapretManager:
         self._strategy_name = ""
         return ZapretResult("remove", True, "готово", "\n".join(lines))
 
-    # ================================================================
-    #  Standalone
-    # ================================================================
-
     def start_standalone(self, strategy_bat: Path, *, force: bool = False) -> ZapretResult:
         if not is_admin():
             return ZapretResult("start", False, "нужны права администратора")
@@ -764,13 +643,8 @@ class ZapretManager:
 
         if self.is_service_running() or _sc_query_status(SERVICE_NAME) in ("START_PENDING", "STOP_PENDING"):
             if not force:
-                return ZapretResult(
-                    "start", False,
-                    "служба zapret уже работает",
-                    "Нажмите «Остановить» или согласитесь остановить её автоматически.",
-                )
-            stop_res = self._stop_service_only()
-            print(f"[zapret] auto-stop service: {stop_res.summary()}")
+                return ZapretResult("start", False, "служба zapret уже работает", "Нажмите «Остановить» или согласитесь остановить её автоматически.")
+            self._stop_service_only()
 
         if _tasklist_has("winws.exe"):
             _run(["taskkill", "/IM", "winws.exe", "/F"], timeout=10)
@@ -791,23 +665,12 @@ class ZapretManager:
             args = self._parse_strategy_bat(strategy_bat)
 
         if not args:
-            return ZapretResult("start", False,
-                                "не удалось получить аргументы",
-                                "Ни из ImagePath службы, ни из .bat-файла.")
+            return ZapretResult("start", False, "не удалось получить аргументы", "Ни из ImagePath службы, ни из .bat-файла.")
 
         cmd = [str(self.winws_path)] + args
-        print(f"[zapret] start_standalone (source={source}): {' '.join(cmd)[:300]}...")
 
         try:
-            self._proc = subprocess.Popen(
-                cmd,
-                cwd=str(self.bin_dir),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                close_fds=True,
-            )
+            self._proc = subprocess.Popen(cmd, cwd=str(self.bin_dir), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
         except OSError as e:
             self._proc = None
             return ZapretResult("start", False, f"не удалось запустить: {e}")
@@ -833,11 +696,9 @@ class ZapretManager:
                 details += f"stderr:\n{err_text.strip()}\n\n"
             if out_text.strip():
                 details += f"stdout:\n{out_text.strip()}"
-            return ZapretResult("start", False,
-                                f"winws.exe завершился с кодом {code}", details)
+            return ZapretResult("start", False, f"winws.exe завершился с кодом {code}", details)
 
-        return ZapretResult("start", True,
-                            f"запущено (PID {self._proc.pid}, стратегия: {strategy_bat.stem})")
+        return ZapretResult("start", True, f"запущено (PID {self._proc.pid}, стратегия: {strategy_bat.stem})")
 
     def stop_standalone(self) -> ZapretResult:
         killed = False
@@ -851,8 +712,8 @@ class ZapretManager:
                     self._proc.kill()
                     self._proc.wait(timeout=2)
                     killed = True
-                except Exception as e:
-                    print(f"[zapret] terminate/kill failed: {e}")
+                except Exception:
+                    pass
             self._proc = None
 
         if _tasklist_has("winws.exe"):
@@ -897,12 +758,7 @@ class ZapretManager:
         self._proc = None
         self._strategy_name = ""
         time.sleep(0.5)
-        return ZapretResult("stop_before_update", True,
-                            "; ".join(lines) if lines else "нечего останавливать")
-
-    # ================================================================
-    #  Game Filter / IPSet / Auto-Update
-    # ================================================================
+        return ZapretResult("stop_before_update", True, "; ".join(lines) if lines else "нечего останавливать")
 
     def get_game_filter_status(self) -> str:
         if not self.game_filter_flag.exists():
@@ -998,8 +854,7 @@ class ZapretManager:
         first, last = etalon_lines[0], etalon_lines[-1]
         if first in current and last in current:
             return ZapretResult("hosts", True, "hosts актуален")
-        return ZapretResult("hosts", False, "hosts требует обновления",
-                            f"нужно вручную скопировать из:\n{GITHUB_HOSTS_URL}")
+        return ZapretResult("hosts", False, "hosts требует обновления", f"нужно вручную скопировать из:\n{GITHUB_HOSTS_URL}")
 
     def open_hosts_editor(self) -> ZapretResult:
         etalon = _http_get(GITHUB_HOSTS_URL)
@@ -1023,19 +878,12 @@ class ZapretManager:
         local = self.get_local_version()
         if local == version:
             return ZapretResult("check_updates", True, f"последняя версия уже установлена: {local}")
-        return ZapretResult("check_updates", True,
-                            f"доступна новая версия: {version} (у вас {local})",
-                            GITHUB_RELEASE_URL + version)
-
-    # ---- Fakes --------------------------------------------------------
+        return ZapretResult("check_updates", True, f"доступна новая версия: {version} (у вас {local})", GITHUB_RELEASE_URL + version)
 
     def list_fakes(self) -> list[Path]:
         if not self.bin_dir.exists():
             return []
-        return sorted([
-            p for p in self.bin_dir.glob("*.bin")
-            if not p.name.upper().startswith("ACTIVE_")
-        ])
+        return sorted([p for p in self.bin_dir.glob("*.bin") if not p.name.upper().startswith("ACTIVE_")])
 
     def replace_active_fake(self, active: str, source: Path) -> ZapretResult:
         if active not in ("discord", "game"):
@@ -1049,8 +897,6 @@ class ZapretManager:
             return ZapretResult("fake", True, f"{active} → {source.name}")
         except OSError as e:
             return ZapretResult("fake", False, "ошибка копирования", str(e))
-
-    # ---- Diagnostics --------------------------------------------------
 
     def run_diagnostics(self) -> ZapretResult:
         lines: list[str] = []
@@ -1095,16 +941,10 @@ class ZapretManager:
         if not script.exists():
             return ZapretResult("tests", False, f"не найден {script}")
         try:
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                cwd=str(self.zapret_dir),
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-            )
+            subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], cwd=str(self.zapret_dir), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
             return ZapretResult("tests", True, "тесты запущены в отдельном окне")
         except OSError as e:
             return ZapretResult("tests", False, "не удалось запустить", str(e))
-
-    # ---- Открытие папок / файлов --------------------------------------
 
     def open_folder(self) -> bool:
         if not self.zapret_dir.exists():
@@ -1158,15 +998,130 @@ class ZapretManager:
             return {"exists": 0, "lines": 0, "size": 0}
         try:
             data = target.read_text(encoding="utf-8", errors="replace")
-            non_empty = sum(
-                1 for line in data.splitlines()
-                if line.strip() and not line.strip().startswith("#")
-            )
+            non_empty = sum(1 for line in data.splitlines() if line.strip() and not line.strip().startswith("#"))
             return {"exists": 1, "lines": non_empty, "size": target.stat().st_size}
         except OSError:
             return {"exists": 0, "lines": 0, "size": 0}
 
-    # ---- Фирменный список --------------------------------------------
+    # ================================================================
+    #  НОВЫЙ МЕТОД: Запуск service.bat без очистки экрана
+    # ================================================================
+    def open_service_bat(self) -> ZapretResult:
+        """Запускает service.bat с отключенным cls и без лишних надписей."""
+        bat_path = self.zapret_dir / "service.bat"
+        if not bat_path.exists():
+            return ZapretResult("open_service", False, "Файл service.bat не найден")
+
+        temp_bat = self.zapret_dir / "service_nocls.bat"
+
+        try:
+            # 1. Читаем в бинарном режиме, чтобы сохранить \r\n
+            with open(bat_path, "rb") as f:
+                data = f.read()
+
+            # 2. Убираем очистку экрана (заменяем на пустую строку)
+            data = data.replace(b"cls\r\n", b"\r\n")
+            
+            # 3. Убираем вывод "Started with admin rights"
+            data = data.replace(b"echo Started with admin rights\r\n", b"\r\n")
+
+            # 4. Пишем обратно
+            with open(temp_bat, "wb") as f:
+                f.write(data)
+
+            # 5. Чистим окружение от Git Bash / venv
+            env = os.environ.copy()
+            sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+            env["PATH"] = ";".join([
+                os.path.join(sysroot, "System32"),
+                sysroot,
+                os.path.join(sysroot, "System32", "Wbem"),
+                os.path.join(sysroot, "System32", "WindowsPowerShell", "v1.0"),
+            ])
+            for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "PROMPT"):
+                env.pop(key, None)
+
+            # 6. Запускаем в новом окне с параметром "admin"
+            subprocess.Popen(
+                f'cmd.exe /c ""{temp_bat}" admin"',
+                cwd=str(self.zapret_dir),
+                env=env,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            return ZapretResult("open_service", True, "Окно service.bat открыто")
+        except Exception as e:
+            return ZapretResult("open_service", False, str(e))
+
+    # ================================================================
+    #  Установка фирменных конфигов
+    # ================================================================
+    def install_creator_configs(self) -> ZapretResult:
+        source_dir = get_asset_path("creator_configs")
+        if not source_dir.exists():
+            return ZapretResult("install_creator", False, "Папка с конфигами создателя не найдена (app/assets/creator_configs/)")
+
+        copied = []
+
+        src_bat = source_dir / "general (ALT11).bat"
+        dst_bat = self.zapret_dir / "general (ALT11).bat"
+        
+        if src_bat.exists():
+            try:
+                dst_bat.parent.mkdir(parents=True, exist_ok=True)
+                if dst_bat.exists():
+                    shutil.copy2(dst_bat, dst_bat.with_suffix(".bat.backup"))
+                shutil.copy2(src_bat, dst_bat)
+                copied.append(dst_bat.name)
+            except OSError as e:
+                print(f"[zapret] Ошибка копирования ALT11: {e}")
+
+        src_lists = source_dir / "lists"
+        dst_lists = self.lists_dir
+        
+        if src_lists.exists() and src_lists.is_dir():
+            for src_file in src_lists.glob("*"):
+                if src_file.is_file():
+                    dst_file = dst_lists / src_file.name
+                    try:
+                        dst_lists.mkdir(parents=True, exist_ok=True)
+                        if dst_file.exists():
+                            shutil.copy2(dst_file, dst_file.with_suffix(dst_file.suffix + ".backup"))
+                        shutil.copy2(src_file, dst_file)
+                        copied.append(f"lists/{src_file.name}")
+                    except OSError as e:
+                        print(f"[zapret] Ошибка копирования {src_file.name}: {e}")
+
+        if not copied:
+            return ZapretResult("install_creator", False, "Не удалось скопировать конфиги")
+
+        excludes = self.cfg.exclude_from_update
+        new_excludes = [
+            "zapret/general (ALT11).bat",
+            "zapret/lists/list-general.txt",
+            "zapret/lists/list-general-user.txt",
+            "zapret/lists/list-exclude-user.txt",
+            "zapret/lists/ipset-exclude-user.txt",
+            "zapret/lists/ipset-all.txt",
+            "zapret/lists/ipset-all.txt.backup",
+            "zapret/lists/list-exclude.txt",
+            "zapret/lists/ipset-exclude.txt",
+            "zapret/lists/list-google.txt"
+        ]
+        
+        changed = False
+        for ex in new_excludes:
+            if ex not in excludes:
+                excludes.append(ex)
+                changed = True
+                
+        if changed:
+            self.cfg.set("exclude_from_update", excludes)
+
+        from app.version import __version__
+        self.cfg.set("last_creator_config_version", __version__)
+        self.cfg.save()
+
+        return ZapretResult("install_creator", True, f"Установлено: {', '.join(copied)}")
 
     def get_bundled_list_info(self, asset_name: str = "list-general.txt") -> dict[str, int]:
         source = get_asset_path(asset_name)
@@ -1174,15 +1129,8 @@ class ZapretManager:
             return {"exists": 0, "lines": 0, "size": 0}
         try:
             data = source.read_text(encoding="utf-8", errors="replace")
-            non_empty = sum(
-                1 for line in data.splitlines()
-                if line.strip() and not line.strip().startswith("#")
-            )
-            return {
-                "exists": 1,
-                "lines": non_empty,
-                "size": source.stat().st_size,
-            }
+            non_empty = sum(1 for line in data.splitlines() if line.strip() and not line.strip().startswith("#"))
+            return {"exists": 1, "lines": non_empty, "size": source.stat().st_size}
         except OSError:
             return {"exists": 0, "lines": 0, "size": 0}
 
@@ -1199,51 +1147,20 @@ class ZapretManager:
     def install_bundled_list(self, asset_name: str = "list-general.txt") -> ZapretResult:
         source = get_asset_path(asset_name)
         if not source.exists():
-            return ZapretResult(
-                "install_list", False,
-                f"встроенный список не найден: {asset_name}",
-                "Проверьте, что в приложении есть app/assets/list-general.txt",
-            )
+            return ZapretResult("install_list", False, f"встроенный список не найден: {asset_name}", "Проверьте, что в приложении есть app/assets/list-general.txt")
 
         target = self.lists_dir / "list-general.txt"
         backup = self.lists_dir / "list-general.txt.backup"
 
         try:
             self.lists_dir.mkdir(parents=True, exist_ok=True)
-
             backup_msg = ""
             if target.exists():
                 shutil.copy2(target, backup)
                 backup_msg = f" Текущий список сохранён в {backup.name}."
-
             shutil.copy2(source, target)
-
             data = target.read_text(encoding="utf-8", errors="replace")
-            lines = sum(
-                1 for line in data.splitlines()
-                if line.strip() and not line.strip().startswith("#")
-            )
-
-            return ZapretResult(
-                "install_list", True,
-                f"установлен фирменный список ({lines} доменов).{backup_msg}",
-            )
+            lines = sum(1 for line in data.splitlines() if line.strip() and not line.strip().startswith("#"))
+            return ZapretResult("install_list", True, f"установлен фирменный список ({lines} доменов).{backup_msg}")
         except OSError as e:
             return ZapretResult("install_list", False, "ошибка копирования", str(e))
-
-
-if __name__ == "__main__":
-    cfg = Config()
-    z = ZapretManager(cfg)
-    print("zapret_dir       :", z.zapret_dir)
-    print("Установлен       :", z.is_installed())
-    print("winws запущен    :", z.is_winws_running())
-    print("Служба работает  :", z.is_service_running())
-    print("Служба установл. :", z.is_service_installed())
-    print("Активен          :", z.is_active())
-    print("Стратегия        :", z.get_active_strategy_name())
-    print("PID winws        :", z.get_winws_pid())
-    print("Админ            :", is_admin())
-    print("Локальная версия :", z.get_local_version())
-    print("BFE status       :", _sc_query_status("BFE"))
-    print("TCP timestamps   :", "включены" if _tcp_timestamps_enabled() else "выключены")

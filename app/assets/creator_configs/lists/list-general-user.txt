@@ -1,0 +1,2 @@
+domain.example.abc
+discord-attachments-uploads-prd.storage.googleapis.com

@@ -101,11 +101,15 @@ CONFIG_PATH = APP_DATA_DIR / "config.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "exclude_from_update": [
-        "zapret/lists/list-general.txt",
-        "zapret/lists/list-general-user.txt",
-        "zapret/lists/list-exclude-user.txt",
-        "zapret/lists/ipset-exclude-user.txt",
+        "zapret/general (ALT11).bat",       # Твой батник (добавлено в 0.1.5)
         "zapret/lists/ipset-all.txt",
+        "zapret/lists/ipset-exclude-user.txt",
+        "zapret/lists/ipset-exclude.txt",   # Твой список (добавлено в 0.1.5)
+        "zapret/lists/list-exclude-user.txt",
+        "zapret/lists/list-exclude.txt",    # Твой список (добавлено в 0.1.5)
+        "zapret/lists/list-general-user.txt",
+        "zapret/lists/list-general.txt",
+        "zapret/lists/list-google.txt",     # Твой список (добавлено в 0.1.5)
         "zapret/lists/ipset-all.txt.backup",
         "tgproxy/config.json",
     ],
@@ -120,6 +124,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Мастер первого запуска: если False — покажем окно установки
     # при старте приложения (только для собранного .exe).
     "first_launch_done": False,
+    # Версия фирменных конфигов (для уведомлений при обновлении)
+    "last_creator_config_version": "0.0.0",
 }
 
 
@@ -212,5 +218,6 @@ if __name__ == "__main__":
     print("TG Proxy          :", cfg.tgproxy_path)
     print("Last strategy     :", cfg.last_strategy or "(не задана)")
     print("first_launch_done :", cfg.get("first_launch_done"))
+    print("last_creator_ver  :", cfg.get("last_creator_config_version"))
     print("Asset (list)      :", get_asset_path("list-general.txt"))
     print("Asset exists      :", get_asset_path("list-general.txt").exists())

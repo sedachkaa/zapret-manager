@@ -6,9 +6,10 @@
 
 Что делает:
     1. Скачивает последний релиз zapret-discord-youtube.
-    2. Скачивает tg-ws-proxy.
-    3. Сохраняет флаг first_launch_done = true.
-    4. Перезапускает приложение.
+    2. Устанавливает фирменные конфиги (если стоит галочка).
+    3. Скачивает tg-ws-proxy.
+    4. Сохраняет флаг first_launch_done = true.
+    5. Перезапускает приложение.
 
 Служба zapret здесь НЕ устанавливается — это делает пользователь
 вручную через вкладку Zapret после того, как выберет нужную
@@ -98,6 +99,7 @@ class Step:
 
 STEPS: list[Step] = [
     Step("download_zapret", "Скачать zapret-discord-youtube", "⬇️"),
+    Step("install_creator", "Установить конфиги создателя (Zapret Manager)", "⚙️"),
     Step("download_tgproxy", "Скачать tg-ws-proxy", "✈️"),
 ]
 
@@ -123,7 +125,7 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         self.tgproxy = tgproxy
 
         self.title("Zapret Manager — первый запуск")
-        self.geometry("620x520")
+        self.geometry("620x580")
         self.resizable(False, False)
 
         self.transient(master)
@@ -160,7 +162,7 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         body.pack(fill="x", padx=20, pady=(0, 12))
 
         ctk.CTkLabel(
-            body, text="Будет скачано:",
+            body, text="Будет установлено:",
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(padx=16, pady=(14, 8), anchor="w")
 
@@ -186,6 +188,16 @@ class FirstLaunchDialog(ctk.CTkToplevel):
             title_label.grid(row=0, column=1, sticky="ew")
 
             self._step_widgets[step.key] = (status_icon, title_label)
+
+        # --- Галочка установки конфигов создателя ---
+        self.use_creator_var = ctk.BooleanVar(value=True)
+        self.creator_checkbox = ctk.CTkCheckBox(
+            self, 
+            text="Установить мои фирменные конфиги (ALT11 + списки)", 
+            variable=self.use_creator_var,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.creator_checkbox.pack(padx=24, pady=(4, 8), anchor="w")
 
         progress_frame = ctk.CTkFrame(self, fg_color="transparent")
         progress_frame.pack(fill="x", padx=20, pady=(0, 8))
@@ -214,7 +226,7 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         self._skip_button.pack(side="left")
 
         self._install_button = ctk.CTkButton(
-            buttons, text="⬇  Скачать",
+            buttons, text="⬇  Установить",
             command=self._on_install,
             width=220, height=40,
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -258,6 +270,11 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         for i, step in enumerate(STEPS):
             self.after(0, lambda s=step: self._mark_running(s.key))
 
+            # Пропускаем шаг с конфигами, если галочка снята
+            if step.key == "install_creator" and not self.use_creator_var.get():
+                self.after(0, lambda s=step: self._mark_done(s.key, True, "Пропущено"))
+                continue
+
             ok, message = self._execute_step(step.key)
 
             self.after(0, lambda s=step, ok=ok, msg=message:
@@ -279,6 +296,9 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         try:
             if key == "download_zapret":
                 return self._step_download_zapret()
+            if key == "install_creator":
+                res = self.zapret.install_creator_configs()
+                return (res.ok, res.message)
             if key == "download_tgproxy":
                 return self._step_download_tgproxy()
         except Exception as e:
@@ -349,7 +369,7 @@ class FirstLaunchDialog(ctk.CTkToplevel):
     def _on_success(self) -> None:
         self._progress.set(1.0)
         self._status_label.configure(
-            text="Всё скачано! Перезапуск приложения через пару секунд…",
+            text="Всё готово! Перезапуск приложения через пару секунд…",
             text_color=STATUS_OK,
         )
 

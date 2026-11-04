@@ -105,6 +105,7 @@ class MainWindow(ctk.CTk):
 
         self.after(300, self._auto_refresh)
         self.after(800, self._check_first_launch)
+        self.after(2500, self._check_creator_config_update) # Проверка обновления конфигов
         self.after(2000, self._check_wrapper_update_on_start)
 
     # ============================================================
@@ -381,6 +382,7 @@ class MainWindow(ctk.CTk):
             ("📁 Папка lists", self._on_zapret_open_lists),
             ("📝 list-general.txt", self._on_zapret_edit_main_list),
             ("📝 user-листы", self._on_zapret_edit_lists),
+            ("⚙ service.bat", self._on_zapret_open_service_bat),  # <--- НОВАЯ КНОПКА
         ]):
             btn = ctk.CTkButton(row2, text=label, command=cmd, width=210, height=32)
             btn.grid(row=0, column=i, padx=4, pady=PAD_BTN, sticky="w")
@@ -573,6 +575,10 @@ class MainWindow(ctk.CTk):
             self.log("zapret", "→ Открыт list-general-user.txt")
         else:
             self.log("zapret", "✗ Не удалось открыть файл")
+
+    def _on_zapret_open_service_bat(self) -> None:
+        res = self.zapret.open_service_bat()
+        self.log("zapret", f"→ {res.summary()}")
 
     def _run_zapret_op(self, title: str, work: Callable,
                        with_details: bool = False,
@@ -1046,6 +1052,41 @@ class MainWindow(ctk.CTk):
             self.cfg.save()
 
     # ============================================================
+    #  НОВЫЙ БЛОК: ПРОВЕРКА ОБНОВЛЕНИЯ КОНФИГОВ
+    # ============================================================
+
+    def _check_creator_config_update(self) -> None:
+        """Проверяет, не обновилась ли версия приложения, и предлагает обновить конфиги."""
+        last_ver = self.cfg.get("last_creator_config_version", "0.0.0")
+        
+        if last_ver != APP_VERSION:
+            # Не показываем при самом первом запуске (там сработает мастер)
+            if not self.cfg.get("first_launch_done", False) and last_ver == "0.0.0":
+                return
+                
+            ans = messagebox.askyesno(
+                "Обновление конфигов",
+                f"Приложение успешно обновлено до версии v{APP_VERSION}.\n\n"
+                "Желаете установить/обновить фирменные конфиги создателя (ALT11 + списки)?",
+                parent=self
+            )
+            if ans:
+                res = self.zapret.install_creator_configs()
+                self.log("zapret", f"→ {res.summary()}")
+                if res.details:
+                    self.log("zapret", res.details)
+                self.set_status("Фирменные конфиги обновлены")
+                
+                if res.ok:
+                    # Обновляем текстовое поле с исключениями прямо на экране!
+                    self.settings_excludes.delete("1.0", "end")
+                    self.settings_excludes.insert("1.0", "\n".join(self.cfg.exclude_from_update))
+            else:
+                # Если отказался, ставим текущую версию, чтобы больше не спрашивало
+                self.cfg.set("last_creator_config_version", APP_VERSION)
+                self.cfg.save()
+
+    # ============================================================
     #  САМООБНОВЛЕНИЕ ОБЁРТКИ
     # ============================================================
 
@@ -1183,48 +1224,30 @@ class MainWindow(ctk.CTk):
         tab = self.sub_bundle_auto
         tab.grid_columnconfigure(0, weight=1)
 
-        bundle_info = self.zapret.get_bundled_list_info()
-
-        card, body = self._make_card(tab, title="📋  Фирменный список доменов")
+        card, body = self._make_card(tab, title="📋  Фирменные конфиги (Zapret Manager)")
         card.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="ew")
 
-        if bundle_info["exists"]:
-            info_text = (
-                f"Встроенный список: {bundle_info['lines']} доменов "
-                f"({bundle_info['size']} байт).\n"
-                "Установка заменит текущий list-general.txt. "
-                "Текущий сохранится в list-general.txt.backup."
-            )
-            info_color = ("gray45", "gray60")
-        else:
-            info_text = (
-                "Встроенный список не найден.\n"
-                "Ожидается файл: app/assets/list-general.txt"
-            )
-            info_color = STATUS_WARN
+        info_text = (
+            "Установка заменит текущие стратегии и списки на авторские:\n"
+            "• general (ALT11).bat\n"
+            "• list-general.txt, list-exclude-user.txt, ipset-exclude-user.txt и др.\n\n"
+            "Текущие файлы сохранятся в .backup.\n"
+            "При обновлении zapret от Flowseal эти файлы НЕ перезаписываются."
+        )
 
         ctk.CTkLabel(body, text=info_text, anchor="w", justify="left", wraplength=1000,
-                     text_color=info_color, font=ctk.CTkFont(size=11)).grid(
+                     text_color=("gray45", "gray60"), font=ctk.CTkFont(size=11)).grid(
             row=0, column=0, padx=4, pady=(0, 10), sticky="w")
 
         btns = ctk.CTkFrame(body, fg_color="transparent")
         btns.grid(row=1, column=0, sticky="ew")
 
-        self._bundled_view_btn = ctk.CTkButton(
-            btns, text="👁  Посмотреть встроенный список",
-            command=self._on_view_bundled_list, width=280, height=36)
-        self._bundled_view_btn.grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ctk.CTkButton(
+            btns, text="📥  Установить фирменные конфиги",
+            command=self._on_install_creator_configs, width=300, height=36,
+            font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=4, pady=4, sticky="w")
 
-        self._bundled_install_btn = ctk.CTkButton(
-            btns, text="📥  Установить фирменный список",
-            command=self._on_install_bundled_list, width=280, height=36,
-            font=ctk.CTkFont(weight="bold"))
-        self._bundled_install_btn.grid(row=0, column=1, padx=4, pady=4, sticky="w")
-
-        if not bundle_info["exists"]:
-            self._bundled_view_btn.configure(state="disabled")
-            self._bundled_install_btn.configure(state="disabled")
-
+        # Блок автозапуска
         card, body = self._make_card(tab, title="🚀  Автозапуск с Windows")
         card.grid(row=1, column=0, padx=8, pady=(4, 8), sticky="ew")
 
@@ -1244,6 +1267,27 @@ class MainWindow(ctk.CTk):
             anchor="w", justify="left", wraplength=1000,
             text_color=("gray45", "gray60"), font=ctk.CTkFont(size=11)).grid(
             row=1, column=0, padx=4, pady=0, sticky="w")
+
+    def _on_install_creator_configs(self) -> None:
+        if not messagebox.askyesno(
+            "Установить конфиги",
+            "Заменить текущие стратегии и списки на фирменные?\n\n"
+            "Текущий general (ALT11).bat и списки будут сохранены в .backup.",
+            parent=self,
+        ):
+            return
+        res = self.zapret.install_creator_configs()
+        self.log("zapret", f"→ {res.summary()}")
+        if res.details:
+            self.log("zapret", res.details)
+            
+        if res.ok:
+            self.set_status("Фирменные конфиги установлены")
+            # Обновляем текстовое поле с исключениями прямо на экране!
+            self.settings_excludes.delete("1.0", "end")
+            self.settings_excludes.insert("1.0", "\n".join(self.cfg.exclude_from_update))
+        else:
+            self.set_status("Ошибка установки")
 
     def _build_subtab_paths(self) -> None:
         tab = self.sub_paths
@@ -1529,35 +1573,6 @@ class MainWindow(ctk.CTk):
             os.startfile(str(APP_INSTALL_DIR))
         except Exception as e:
             self.set_status(f"Не удалось открыть: {e}")
-
-    # ---- Фирменный список ----
-
-    def _on_view_bundled_list(self) -> None:
-        if self.zapret.open_bundled_list():
-            self.log("zapret", "→ Открыт встроенный фирменный список")
-        else:
-            self.log("zapret", "✗ Не удалось открыть встроенный список")
-            self.set_status("Встроенный список не найден")
-
-    def _on_install_bundled_list(self) -> None:
-        info = self.zapret.get_bundled_list_info()
-        if not info["exists"]:
-            self.set_status("Встроенный список не найден")
-            return
-        if not messagebox.askyesno(
-            "Установить фирменный список",
-            f"Заменить текущий list-general.txt на фирменный?\n\n"
-            f"В нём {info['lines']} доменов.\n\n"
-            f"Текущий будет сохранён в list-general.txt.backup.",
-            parent=self,
-        ):
-            self.log("zapret", "→ Установка фирменного списка отменена")
-            return
-        res = self.zapret.install_bundled_list()
-        self.log("zapret", f"→ {res.summary()}")
-        if res.details:
-            self.log("zapret", res.details)
-        self.set_status("Фирменный список установлен" if res.ok else "Ошибка установки")
 
     # ---- Исключения ----
 
