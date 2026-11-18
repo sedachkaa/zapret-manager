@@ -119,7 +119,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auto_check_updates_on_start": True,
     "theme": "dark",
     "last_strategy": "",
-    "shortcut_prompted": False,
     "last_wrapper_check": 0,
     # Мастер первого запуска: если False — покажем окно установки
     # при старте приложения (только для собранного .exe).

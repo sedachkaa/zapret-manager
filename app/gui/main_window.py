@@ -237,7 +237,6 @@ class MainWindow(ctk.CTk):
     def _auto_refresh(self) -> None:
         try:
             self._refresh_zapret_status()
-            self._refresh_zapret_toggles()
             self._refresh_tgproxy_status()
         except Exception as e:
             print("[auto_refresh] error:", e)
@@ -312,92 +311,42 @@ class MainWindow(ctk.CTk):
             btn.grid(row=0, column=i + 2, padx=4, pady=PAD_BTN, sticky="w")
             self.zapret_buttons.append(btn)
 
-        card, body = self._make_card(scroll, title="🎛  Фильтры")
-        card.grid(row=1, column=0, padx=PAD_SECTION, pady=4, sticky="ew")
+        card, body = self._make_card(scroll, title="🚀  service.bat и папки")
+        card.grid(row=1, column=0, padx=PAD_SECTION, pady=(4, PAD_SECTION), sticky="ew")
+
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.grid(row=0, column=0, sticky="ew")
 
-        ctk.CTkLabel(row, text="Game Filter:", font=ctk.CTkFont(size=12)).grid(
-            row=0, column=0, padx=(0, 8), pady=PAD_BTN, sticky="w")
-        self.game_filter_var = ctk.StringVar(value="disabled")
-        self.game_filter_menu = ctk.CTkOptionMenu(
-            row, values=["disabled", "all (TCP+UDP)", "TCP only", "UDP only"],
-            variable=self.game_filter_var, width=200)
-        self.game_filter_menu.grid(row=0, column=1, padx=(0, 8), pady=PAD_BTN, sticky="w")
-        btn = ctk.CTkButton(row, text="Применить", command=self._on_zapret_apply_game_filter,
-                            width=140, height=32)
-        btn.grid(row=0, column=2, padx=4, pady=PAD_BTN, sticky="w")
+        btn = ctk.CTkButton(
+            row, text="⚙  Открыть service.bat", command=self._on_zapret_open_service_bat,
+            width=280, height=38, font=ctk.CTkFont(size=13, weight="bold"))
+        btn.grid(row=0, column=0, padx=4, pady=PAD_BTN, sticky="w")
         self.zapret_buttons.append(btn)
 
-        ctk.CTkLabel(row, text="IPSet:", font=ctk.CTkFont(size=12)).grid(
-            row=0, column=3, padx=(24, 8), pady=PAD_BTN, sticky="w")
-        self.ipset_status_label = ctk.CTkLabel(row, text="?", width=80, anchor="w",
-                                                font=ctk.CTkFont(weight="bold"))
-        self.ipset_status_label.grid(row=0, column=4, padx=(0, 8), pady=PAD_BTN, sticky="w")
-        btn = ctk.CTkButton(row, text="Переключить", command=self._on_zapret_toggle_ipset,
-                            width=130, height=32)
-        btn.grid(row=0, column=5, padx=4, pady=PAD_BTN, sticky="w")
-        self.zapret_buttons.append(btn)
-
-        card, body = self._make_card(scroll, title="🎭  Активные fakes")
-        card.grid(row=2, column=0, padx=PAD_SECTION, pady=4, sticky="ew")
-        row = ctk.CTkFrame(body, fg_color="transparent")
-        row.grid(row=0, column=0, sticky="ew")
-
-        ctk.CTkLabel(row, text="Тип:", font=ctk.CTkFont(size=12)).grid(
-            row=0, column=0, padx=(0, 8), pady=PAD_BTN, sticky="w")
-        self.fake_type_var = ctk.StringVar(value="Discord UDP")
-        self.fake_type_menu = ctk.CTkOptionMenu(
-            row, values=["Discord UDP", "GameFilter UDP"],
-            variable=self.fake_type_var, width=170)
-        self.fake_type_menu.grid(row=0, column=1, padx=(0, 8), pady=PAD_BTN, sticky="w")
-        ctk.CTkLabel(row, text="Файл:", font=ctk.CTkFont(size=12)).grid(
-            row=0, column=2, padx=(24, 8), pady=PAD_BTN, sticky="w")
-        self.fake_file_var = ctk.StringVar(value="—")
-        self.fake_file_menu = ctk.CTkOptionMenu(
-            row, values=["—"], variable=self.fake_file_var, width=280)
-        self.fake_file_menu.grid(row=0, column=3, padx=(0, 8), pady=PAD_BTN, sticky="w")
-        btn = ctk.CTkButton(row, text="Заменить", command=self._on_zapret_replace_fake,
-                            width=140, height=32)
-        btn.grid(row=0, column=4, padx=4, pady=PAD_BTN, sticky="w")
-        self.zapret_buttons.append(btn)
-
-        card, body = self._make_card(scroll, title="🛠  Инструменты")
-        card.grid(row=3, column=0, padx=PAD_SECTION, pady=(4, PAD_SECTION), sticky="ew")
-        row = ctk.CTkFrame(body, fg_color="transparent")
-        row.grid(row=0, column=0, sticky="ew")
-        for i, (label, cmd) in enumerate([
-            ("ℹ Check Status", self._on_zapret_status),
-            ("🩺 Diagnostics", self._on_zapret_diagnostics),
-            ("🧪 Run Tests", self._on_zapret_run_tests),
-        ]):
-            btn = ctk.CTkButton(row, text=label, command=cmd, width=180, height=32)
-            btn.grid(row=0, column=i, padx=4, pady=PAD_BTN, sticky="w")
-            self.zapret_buttons.append(btn)
-
-        row2 = ctk.CTkFrame(body, fg_color="transparent")
-        row2.grid(row=1, column=0, pady=(4, 0), sticky="ew")
         for i, (label, cmd) in enumerate([
             ("📁 Папка zapret", self._on_zapret_open_folder),
             ("📁 Папка lists", self._on_zapret_open_lists),
-            ("📝 list-general.txt", self._on_zapret_edit_main_list),
-            ("📝 user-листы", self._on_zapret_edit_lists),
-            ("⚙ service.bat", self._on_zapret_open_service_bat),  # <--- НОВАЯ КНОПКА
         ]):
-            btn = ctk.CTkButton(row2, text=label, command=cmd, width=210, height=32)
-            btn.grid(row=0, column=i, padx=4, pady=PAD_BTN, sticky="w")
+            btn = ctk.CTkButton(row, text=label, command=cmd, width=200, height=38)
+            btn.grid(row=0, column=i + 1, padx=4, pady=PAD_BTN, sticky="w")
             self.zapret_buttons.append(btn)
+
+        ctk.CTkLabel(
+            body,
+            text=("Game Filter, IPSet, fake-файлы, диагностика и тесты теперь "
+                  "находятся внутри service.bat — здесь оставлены только "
+                  "быстрый запуск и статус."),
+            anchor="w", justify="left", wraplength=1000,
+            text_color=("gray45", "gray60"), font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, padx=4, pady=(2, 0), sticky="w")
 
         ctk.CTkLabel(tab, text="Журнал:", anchor="w",
                      font=ctk.CTkFont(size=12, weight="bold")).grid(
             row=2, column=0, padx=PAD_SECTION + 6, pady=(6, 0), sticky="w")
-        self.zapret_log = ctk.CTkTextbox(tab, wrap="word", height=140)
+        self.zapret_log = ctk.CTkTextbox(tab, wrap="word", height=180)
         self.zapret_log.grid(row=3, column=0, padx=PAD_SECTION, pady=(4, PAD_SECTION), sticky="nsew")
 
         self.after(200, lambda: self._bind_mousewheel_recursive(scroll))
-
-        self._refresh_zapret_toggles()
-        self._refresh_fake_menu()
 
     def _on_strategy_changed(self, value: str) -> None:
         if not value or value == "—":
@@ -460,30 +409,6 @@ class MainWindow(ctk.CTk):
         if self.zapret_strategy_label.cget("text") != new_strat_text:
             self.zapret_strategy_label.configure(text=new_strat_text)
 
-    def _refresh_zapret_toggles(self) -> None:
-        gf = self.zapret.get_game_filter_status()
-        mapping = {"disabled": "disabled", "all": "all (TCP+UDP)",
-                   "tcp": "TCP only", "udp": "UDP only"}
-        new_gf = mapping.get(gf, "disabled")
-        if self.game_filter_var.get() != new_gf:
-            self.game_filter_var.set(new_gf)
-
-        ipset = self.zapret.get_ipset_status()
-        if self.ipset_status_label.cget("text") != ipset:
-            self.ipset_status_label.configure(text=ipset)
-            color = STATUS_OK if ipset == "loaded" else STATUS_NEUTRAL
-            self.ipset_status_label.configure(text_color=color)
-
-    def _refresh_fake_menu(self) -> None:
-        fakes = [p.name for p in self.zapret.list_fakes()]
-        if fakes:
-            self.fake_file_menu.configure(values=fakes)
-            if self.fake_file_var.get() not in fakes:
-                self.fake_file_var.set(fakes[0])
-        else:
-            self.fake_file_menu.configure(values=["—"])
-            self.fake_file_var.set("—")
-
     def _on_zapret_start(self) -> None:
         name = self.strategy_var.get()
         strategy_bat = self.zapret.zapret_dir / f"{name}.bat"
@@ -513,44 +438,6 @@ class MainWindow(ctk.CTk):
         self._run_zapret_op(f"Перезапуск {name}",
                             lambda: self.zapret.restart_smart(strategy_bat), with_details=True)
 
-    def _on_zapret_status(self) -> None:
-        self._run_zapret_op("Check Status", lambda: self.zapret.get_service_status(), with_details=True)
-
-    def _on_zapret_apply_game_filter(self) -> None:
-        label = self.game_filter_var.get()
-        mode = {"disabled": "disabled", "all (TCP+UDP)": "all",
-                "TCP only": "tcp", "UDP only": "udp"}.get(label, "disabled")
-        res = self.zapret.set_game_filter(mode)
-        self.log("zapret", f"→ {res.summary()}")
-        self._refresh_zapret_toggles()
-
-    def _on_zapret_toggle_ipset(self) -> None:
-        res = self.zapret.toggle_ipset()
-        self.log("zapret", f"→ {res.summary()}")
-        if res.details:
-            self.log("zapret", res.details)
-        self._refresh_zapret_toggles()
-
-    def _on_zapret_replace_fake(self) -> None:
-        type_label = self.fake_type_var.get()
-        active = "discord" if type_label.startswith("Discord") else "game"
-        fname = self.fake_file_var.get()
-        if fname == "—":
-            self.log("zapret", "✗ не выбран fake-файл")
-            return
-        source = self.zapret.bin_dir / fname
-        res = self.zapret.replace_active_fake(active, source)
-        self.log("zapret", f"→ {res.summary()}")
-
-    def _on_zapret_diagnostics(self) -> None:
-        self._run_zapret_op("Diagnostics", lambda: self.zapret.run_diagnostics(), with_details=True)
-
-    def _on_zapret_run_tests(self) -> None:
-        res = self.zapret.run_tests()
-        self.log("zapret", f"→ {res.summary()}")
-        if res.details:
-            self.log("zapret", res.details)
-
     def _on_zapret_open_folder(self) -> None:
         if self.zapret.open_folder():
             self.log("zapret", "→ Открыта папка zapret/")
@@ -562,19 +449,6 @@ class MainWindow(ctk.CTk):
             self.log("zapret", "→ Открыта папка lists/")
         else:
             self.log("zapret", "✗ Папка lists/ не найдена")
-
-    def _on_zapret_edit_main_list(self) -> None:
-        if self.zapret.edit_main_list():
-            info = self.zapret.get_main_list_info()
-            self.log("zapret", f"→ Открыт list-general.txt ({info.get('lines', 0)} доменов)")
-        else:
-            self.log("zapret", "✗ Не удалось открыть list-general.txt")
-
-    def _on_zapret_edit_lists(self) -> None:
-        if self.zapret.edit_user_lists():
-            self.log("zapret", "→ Открыт list-general-user.txt")
-        else:
-            self.log("zapret", "✗ Не удалось открыть файл")
 
     def _on_zapret_open_service_bat(self) -> None:
         res = self.zapret.open_service_bat()
@@ -597,8 +471,6 @@ class MainWindow(ctk.CTk):
             except Exception as e:
                 self.log("zapret", f"✗ Ошибка пост-обработки: {e}")
         self._refresh_zapret_status()
-        self._refresh_zapret_toggles()
-        self._refresh_fake_menu()
         self._refresh_strategies_menu()
         self.set_status("Готово")
 
@@ -1169,12 +1041,10 @@ class MainWindow(ctk.CTk):
         self.sub_excl = sub.add("📋  Исключения")
         self.sub_bundle_auto = sub.add("🚀  Список и автозапуск")
         self.sub_paths = sub.add("📁  Папки и обновление")
-        self.sub_token = sub.add("🔑  GitHub токен")
 
         self._build_subtab_exclusions()
         self._build_subtab_bundle_autostart()
         self._build_subtab_paths()
-        self._build_subtab_token()
 
     def _build_subtab_exclusions(self) -> None:
         tab = self.sub_excl
@@ -1340,180 +1210,6 @@ class MainWindow(ctk.CTk):
             command=lambda: self._check_wrapper_update_on_start(force=True),
             width=230, height=34)
         self.check_wrapper_btn.grid(row=0, column=1, padx=4, sticky="e")
-
-    def _build_subtab_token(self) -> None:
-        """Под-вкладка с информацией о GitHub-токене."""
-        tab = self.sub_token
-        tab.grid_columnconfigure(0, weight=1)
-
-        # --- Статус ---
-        card, body = self._make_card(tab, title="🔑  GitHub-токен")
-        card.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="ew")
-
-        ctk.CTkLabel(
-            body,
-            text=("Токен нужен, чтобы увеличить лимит запросов к GitHub API\n"
-                  "с 60 до 5000 в час. Без токена при частых проверках обновлений\n"
-                  "можно получить ошибку «rate limit exceeded»."),
-            anchor="w", justify="left", wraplength=1000,
-            text_color=("gray45", "gray60"), font=ctk.CTkFont(size=11),
-        ).grid(row=0, column=0, padx=4, pady=(0, 12), sticky="w")
-
-        # Строка «Статус: …»
-        status_row = ctk.CTkFrame(body, fg_color="transparent")
-        status_row.grid(row=1, column=0, sticky="ew")
-
-        ctk.CTkLabel(
-            status_row, text="Статус:",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, padx=(4, 8), pady=4, sticky="w")
-
-        self.token_status_label = ctk.CTkLabel(
-            status_row, text="—",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        )
-        self.token_status_label.grid(row=0, column=1, padx=(0, 8), pady=4, sticky="w")
-
-        # Кнопки
-        btn_row = ctk.CTkFrame(body, fg_color="transparent")
-        btn_row.grid(row=2, column=0, pady=(12, 0), sticky="ew")
-
-        ctk.CTkButton(
-            btn_row, text="🔄  Обновить статус",
-            command=self._refresh_token_status,
-            width=200, height=36,
-        ).grid(row=0, column=0, padx=4, pady=4, sticky="w")
-
-        ctk.CTkButton(
-            btn_row, text="📖  Как настроить?",
-            command=self._show_token_help,
-            width=200, height=36,
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=1, padx=4, pady=4, sticky="w")
-
-        # Подсказка про перезапуск
-        ctk.CTkLabel(
-            body,
-            text=("⚠ После настройки токена обязательно перезапустите приложение —\n"
-                  "переменные окружения читаются только при запуске процесса."),
-            anchor="w", justify="left", wraplength=1000,
-            text_color=STATUS_WARN, font=ctk.CTkFont(size=11),
-        ).grid(row=3, column=0, padx=4, pady=(12, 0), sticky="w")
-
-        # Заполняем статус сразу
-        self._refresh_token_status()
-
-    def _refresh_token_status(self) -> None:
-        """Обновляет надпись со статусом токена."""
-        if updater.has_github_token():
-            self.token_status_label.configure(
-                text="Настроен ✓  (лимит 5000 запросов/час)",
-                text_color=STATUS_OK,
-            )
-        else:
-            self.token_status_label.configure(
-                text="Не настроен  (лимит 60 запросов/час)",
-                text_color=STATUS_WARN,
-            )
-
-    def _show_token_help(self) -> None:
-        """Открывает окно с пошаговой инструкцией по настройке токена."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Как настроить GitHub-токен")
-        dialog.geometry("720x620")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.lift()
-        dialog.focus_force()
-
-        ctk.CTkLabel(
-            dialog,
-            text="🔑  Настройка GitHub-токена",
-            font=ctk.CTkFont(size=20, weight="bold"),
-        ).pack(padx=24, pady=(20, 8), anchor="w")
-
-        ctk.CTkLabel(
-            dialog,
-            text=("Токен нужен для увеличения лимита GitHub API. "
-                  "Задача занимает ~3 минуты."),
-            font=ctk.CTkFont(size=12),
-            text_color=("gray45", "gray60"),
-        ).pack(padx=24, pady=(0, 12), anchor="w")
-
-        # Инструкция в скроллируемом текстовом поле
-        text = ctk.CTkTextbox(
-            dialog,
-            wrap="word",
-            font=ctk.CTkFont(size=12, family="Consolas"),
-            border_width=1,
-        )
-        text.pack(fill="both", expand=True, padx=24, pady=(0, 12))
-
-        instructions = (
-            "ШАГ 1. Создаём токен на GitHub\n"
-            "──────────────────────────────────\n"
-            "1. Открой в браузере: https://github.com/settings/tokens\n"
-            "2. Нажми «Generate new token» → «Generate new token (classic)».\n"
-            "3. Note: напиши название, например ZapretManager.\n"
-            "4. Expiration: выбери «No expiration» (или 90 дней — как хочешь).\n"
-            "5. Scopes: поставь галочку только у [public_repo].\n"
-            "   (Если репозиторий приватный — [repo].)\n"
-            "6. Нажми «Generate token» внизу страницы.\n"
-            "7. Скопируй строку, начинающуюся с ghp_ — она показывается\n"
-            "   ТОЛЬКО ОДИН РАЗ. Если потеряешь — придётся создавать заново.\n"
-            "\n"
-            "ШАГ 2. Добавляем переменную окружения в Windows\n"
-            "──────────────────────────────────\n"
-            "1. Нажми Win и начни печатать: «Изменение переменных среды».\n"
-            "2. Открой «Изменение переменных среды текущего пользователя».\n"
-            "3. В верхнем блоке «Переменные среды пользователя» нажми «Создать».\n"
-            "4. Имя переменной:  GITHUB_TOKEN\n"
-            "5. Значение:        вставь свой токен (ghp_...)\n"
-            "6. Нажми «ОК» во всех окнах.\n"
-            "\n"
-            "ШАГ 3. Перезапуск\n"
-            "──────────────────────────────────\n"
-            "1. Полностью закрой Zapret Manager (не просто сверни окно).\n"
-            "2. Запусти его заново.\n"
-            "3. Зайди: Настройки → 🔑 GitHub токен.\n"
-            "4. Статус должен стать: «Настроен ✓  (лимит 5000 запросов/час)».\n"
-            "\n"
-            "ПРОВЕРКА\n"
-            "──────────────────────────────────\n"
-            "Можно открыть в браузере: https://api.github.com/rate_limit\n"
-            "С токеном ты увидишь \"limit\": 5000 в блоке \"core\".\n"
-            "\n"
-            "ВАЖНО\n"
-            "──────────────────────────────────\n"
-            "• Токен НЕ хранится в config.json и НЕ показывается в приложении.\n"
-            "• Токен лежит только в переменных окружения Windows.\n"
-            "• Если токен утечёт — сразу отзови его по ссылке:\n"
-            "  https://github.com/settings/tokens\n"
-            "• Для пользователей приложения: если тебе хватает 60 запросов/час,\n"
-            "  ничего настраивать не нужно — оставь как есть.\n"
-        )
-
-        text.insert("1.0", instructions)
-        text.configure(state="disabled")
-
-        # Кнопки
-        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=24, pady=(0, 20))
-
-        ctk.CTkButton(
-            btn_frame, text="Открыть страницу создания токена",
-            command=lambda: os.startfile("https://github.com/settings/tokens"),
-            width=280, height=36,
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            btn_frame, text="Закрыть",
-            command=dialog.destroy,
-            width=140, height=36,
-            fg_color=("gray75", "gray28"),
-            hover_color=("gray65", "gray35"),
-        ).pack(side="right")
 
     def _make_path_tile(self, parent, *, col, icon, title, subtitle, path, command) -> None:
         tile = ctk.CTkFrame(parent, corner_radius=10, fg_color=TILE_FG,
