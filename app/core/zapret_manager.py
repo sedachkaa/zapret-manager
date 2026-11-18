@@ -1053,18 +1053,19 @@ class ZapretManager:
             return ZapretResult("open_service", False, str(e))
 
     # ================================================================
-    #  Установка фирменных конфигов
+    #  Установка единственного рабочего конфига
     # ================================================================
-    def install_creator_configs(self) -> ZapretResult:
+    def install_bundled_config(self) -> ZapretResult:
         source_dir = get_asset_path("creator_configs")
         if not source_dir.exists():
-            return ZapretResult("install_creator", False, "Папка с конфигами создателя не найдена (app/assets/creator_configs/)")
+            return ZapretResult("install_config", False, "Встроенный конфиг не найден")
 
+        strategy_name = "general (ALT11).bat"
         copied = []
 
-        src_bat = source_dir / "general (ALT11).bat"
-        dst_bat = self.zapret_dir / "general (ALT11).bat"
-        
+        src_bat = source_dir / strategy_name
+        dst_bat = self.zapret_dir / strategy_name
+
         if src_bat.exists():
             try:
                 dst_bat.parent.mkdir(parents=True, exist_ok=True)
@@ -1073,11 +1074,11 @@ class ZapretManager:
                 shutil.copy2(src_bat, dst_bat)
                 copied.append(dst_bat.name)
             except OSError as e:
-                print(f"[zapret] Ошибка копирования ALT11: {e}")
+                print(f"[zapret] Ошибка копирования {strategy_name}: {e}")
 
         src_lists = source_dir / "lists"
         dst_lists = self.lists_dir
-        
+
         if src_lists.exists() and src_lists.is_dir():
             for src_file in src_lists.glob("*"):
                 if src_file.is_file():
@@ -1092,7 +1093,24 @@ class ZapretManager:
                         print(f"[zapret] Ошибка копирования {src_file.name}: {e}")
 
         if not copied:
-            return ZapretResult("install_creator", False, "Не удалось скопировать конфиги")
+            return ZapretResult("install_config", False, "Не удалось скопировать конфиг")
+
+        removed = []
+        backup_dir = self.zapret_dir / "backup_strategies"
+        for bat in self.zapret_dir.glob("*.bat"):
+            if bat.name.lower().startswith("service"):
+                continue
+            if bat.name == strategy_name:
+                continue
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                target = backup_dir / bat.name
+                if target.exists():
+                    target.unlink()
+                bat.replace(target)
+                removed.append(bat.name)
+            except OSError as e:
+                print(f"[zapret] Не удалось убрать лишнюю стратегию {bat.name}: {e}")
 
         excludes = self.cfg.exclude_from_update
         new_excludes = [
@@ -1121,7 +1139,8 @@ class ZapretManager:
         self.cfg.set("last_creator_config_version", __version__)
         self.cfg.save()
 
-        return ZapretResult("install_creator", True, f"Установлено: {', '.join(copied)}")
+        extra = f", убрано лишних стратегий: {len(removed)}" if removed else ""
+        return ZapretResult("install_config", True, f"Установлено: {', '.join(copied)}{extra}")
 
     def get_bundled_list_info(self, asset_name: str = "list-general.txt") -> dict[str, int]:
         source = get_asset_path(asset_name)

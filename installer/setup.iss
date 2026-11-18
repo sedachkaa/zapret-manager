@@ -3,7 +3,7 @@
 ; Результат: ZapretManager-Setup-<version>.exe
 
 #define MyAppName "Zapret Manager"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "sedachkaa"
 #define MyAppURL "https://github.com/sedachkaa/zapret-manager"
 #define MyAppExeName "ZapretManager.exe"
@@ -56,7 +56,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
-Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1
 
 [Files]
 Source: "..\dist\ZapretManager\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -64,7 +63,6 @@ Source: "..\dist\ZapretManager\*"; DestDir: "{app}"; Flags: ignoreversion recurs
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
-Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: quicklaunchicon; IconFilename: "{app}\{#MyAppExeName}"; IconIndex: 0
 
 [Run]
 ; Обычная (визард) установка: показываем галочку "Запустить приложение" на финальном экране.
@@ -74,33 +72,10 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c taskkill /F /IM {#MyAppExeName} /T"; Flags: runhidden; RunOnceId: "KillApp"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Start-Process -FilePath cmd.exe -ArgumentList '/c sc stop zapret >nul 2>&1 & sc delete zapret >nul 2>&1 & taskkill /F /IM winws.exe /T >nul 2>&1 & taskkill /F /IM TgWsProxy_windows.exe /T >nul 2>&1' -Verb RunAs -WindowStyle Hidden -Wait"""; Flags: runhidden; RunOnceId: "RemoveZapretService"
+Filename: "{cmd}"; Parameters: "/c reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v ZapretManager /f"; Flags: runhidden; RunOnceId: "RemoveAutostart"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\logs"
-
-[Code]
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  DataDir: String;
-  Res: Integer;
-begin
-  if CurUninstallStep = usPostUninstall then
-  begin
-    DataDir := ExpandConstant('{localappdata}\ZapretManager');
-    if DirExists(DataDir) then
-    begin
-      Res := MsgBox('Удалить также пользовательские данные?' + #13#10 +
-                    DataDir + #13#10 + #13#10 +
-                    'Там хранятся: config.json, логи, списки доменов, скачанные zapret и tg-ws-proxy.',
-                    mbConfirmation, MB_YESNO);
-      if Res = IDYES then
-        DelTree(DataDir, True, True, True);
-    end;
-  end;
-end;
-
-function InitializeSetup(): Boolean;
-begin
-  Result := True;
-end;
+Type: filesandordirs; Name: "{localappdata}\ZapretManager"

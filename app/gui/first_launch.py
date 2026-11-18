@@ -1,24 +1,13 @@
 """
-Мастер первого запуска Zapret Manager.
+Автоматическая подготовка Zapret Manager при первом запуске.
 
-Показывается один раз — при первом старте собранного .exe,
-если в config.json first_launch_done = False.
-
-Что делает:
+Окно показывает прогресс и сразу начинает установку без вопросов:
     1. Скачивает последний релиз zapret-discord-youtube.
-    2. Устанавливает фирменные конфиги (если стоит галочка).
+    2. Устанавливает единственный рабочий конфиг и списки.
     3. Скачивает tg-ws-proxy.
-    4. Сохраняет флаг first_launch_done = true.
-    5. Перезапускает приложение.
+    4. Сохраняет флаг first_launch_done и перезапускает приложение.
 
-Служба zapret здесь НЕ устанавливается — это делает пользователь
-вручную через вкладку Zapret после того, как выберет нужную
-стратегию из списка (после перезапуска список .bat-файлов будет
-заполнен свежими стратегиями).
-
-Если на каком-то шаге ошибка — показывает её и предлагает
-повторить или пропустить (тогда флаг всё равно ставится,
-чтобы не мучить пользователя при каждом запуске).
+Если шаг не удался — предлагает повторить или закрыть окно.
 """
 
 from __future__ import annotations
@@ -28,7 +17,6 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from tkinter import messagebox
 
 import customtkinter as ctk
 
@@ -46,16 +34,8 @@ STATUS_ERROR = ("#b91c1c", "#ef4444")
 STATUS_NEUTRAL = ("gray45", "gray60")
 
 
-# --- Перезапуск --------------------------------------------------------
-
 def restart_app(delay_seconds: int = 2) -> None:
-    """
-    Перезапускает приложение через указанное число секунд.
-
-    Работает и для собранного .exe, и для запуска из исходников:
-        - .exe (frozen): запускаем sys.executable без аргументов.
-        - исходники: перезапускаем `python -m app.main`.
-    """
+    """Перезапускает приложение через указанное число секунд."""
     if getattr(sys, "frozen", False):
         exe = sys.executable
         args = sys.argv[1:]
@@ -88,28 +68,21 @@ def restart_app(delay_seconds: int = 2) -> None:
     os._exit(0)
 
 
-# --- Описание шагов ----------------------------------------------------
-
 @dataclass
 class Step:
     key: str
     title: str
-    icon: str
 
 
 STEPS: list[Step] = [
-    Step("download_zapret", "Скачать zapret-discord-youtube", "⬇️"),
-    Step("install_creator", "Установить конфиги создателя (Zapret Manager)", "⚙️"),
-    Step("download_tgproxy", "Скачать tg-ws-proxy", "✈️"),
+    Step("download_zapret", "Скачивание zapret-discord-youtube"),
+    Step("install_config", "Установка рабочего конфига"),
+    Step("download_tgproxy", "Скачивание tg-ws-proxy"),
 ]
 
 
-# --- Диалог ------------------------------------------------------------
-
 class FirstLaunchDialog(ctk.CTkToplevel):
-    """
-    Модальное окно установки компонентов при первом запуске.
-    """
+    """Модальное окно автоматической установки компонентов."""
 
     def __init__(
         self,
@@ -124,8 +97,8 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         self.zapret = zapret
         self.tgproxy = tgproxy
 
-        self.title("Zapret Manager — первый запуск")
-        self.geometry("620x580")
+        self.title("Zapret Manager — подготовка")
+        self.geometry("560x420")
         self.resizable(False, False)
 
         self.transient(master)
@@ -135,24 +108,23 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         self.focus_force()
 
         self._step_statuses: dict[str, str] = {s.key: "pending" for s in STEPS}
-        self._current_step: str = ""
         self._lock_actions = False
-        self._any_success = False
 
         self._build_ui()
+        self.after(150, self._start_install)
 
     # --- UI ------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        header = ctk.CTkFrame(self, height=64, corner_radius=0)
+        header = ctk.CTkFrame(self, height=72, corner_radius=0)
         header.pack(fill="x")
         ctk.CTkLabel(
-            header, text="🚀  Первый запуск",
+            header, text="Подготовка к работе",
             font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(padx=24, pady=(16, 4), anchor="w")
+        ).pack(padx=24, pady=(16, 2), anchor="w")
         ctk.CTkLabel(
             header,
-            text="Скачаем компоненты, которые нужны для работы приложения.",
+            text="Компоненты скачиваются автоматически. Это займёт минуту.",
             font=ctk.CTkFont(size=12),
             text_color=("gray45", "gray60"),
         ).pack(padx=24, pady=(0, 12), anchor="w")
@@ -161,43 +133,25 @@ class FirstLaunchDialog(ctk.CTkToplevel):
                             fg_color=CARD_FG, border_width=1, border_color=CARD_BORDER)
         body.pack(fill="x", padx=20, pady=(0, 12))
 
-        ctk.CTkLabel(
-            body, text="Будет установлено:",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(padx=16, pady=(14, 8), anchor="w")
-
-        self._step_widgets: dict[str, tuple[ctk.CTkLabel, ctk.CTkLabel]] = {}
+        self._step_widgets: dict[str, ctk.CTkLabel] = {}
         for step in STEPS:
             row = ctk.CTkFrame(body, fg_color="transparent")
-            row.pack(fill="x", padx=16, pady=4)
+            row.pack(fill="x", padx=16, pady=5)
             row.grid_columnconfigure(1, weight=1)
 
             status_icon = ctk.CTkLabel(
-                row, text="○",
+                row, text="○", width=24,
                 font=ctk.CTkFont(size=16),
-                width=24,
                 text_color=STATUS_NEUTRAL,
             )
             status_icon.grid(row=0, column=0, padx=(0, 8), sticky="w")
 
-            title_text = f"{step.icon}  {step.title}"
-            title_label = ctk.CTkLabel(
-                row, text=title_text, anchor="w",
+            ctk.CTkLabel(
+                row, text=step.title, anchor="w",
                 font=ctk.CTkFont(size=12),
-            )
-            title_label.grid(row=0, column=1, sticky="ew")
+            ).grid(row=0, column=1, sticky="ew")
 
-            self._step_widgets[step.key] = (status_icon, title_label)
-
-        # --- Галочка установки конфигов создателя ---
-        self.use_creator_var = ctk.BooleanVar(value=True)
-        self.creator_checkbox = ctk.CTkCheckBox(
-            self, 
-            text="Установить мои фирменные конфиги (ALT11 + списки)", 
-            variable=self.use_creator_var,
-            font=ctk.CTkFont(size=12, weight="bold")
-        )
-        self.creator_checkbox.pack(padx=24, pady=(4, 8), anchor="w")
+            self._step_widgets[step.key] = status_icon
 
         progress_frame = ctk.CTkFrame(self, fg_color="transparent")
         progress_frame.pack(fill="x", padx=20, pady=(0, 8))
@@ -207,59 +161,52 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         self._progress.set(0)
 
         self._status_label = ctk.CTkLabel(
-            progress_frame, text="Готово к установке",
+            progress_frame, text="Подготовка…",
             anchor="w", font=ctk.CTkFont(size=11),
             text_color=("gray45", "gray60"),
         )
         self._status_label.pack(fill="x")
 
-        buttons = ctk.CTkFrame(self, fg_color="transparent")
-        buttons.pack(fill="x", padx=20, pady=(8, 20))
+        self._buttons = ctk.CTkFrame(self, fg_color="transparent")
+        self._buttons.pack(fill="x", padx=20, pady=(8, 20))
 
-        self._skip_button = ctk.CTkButton(
-            buttons, text="Пропустить",
-            command=self._on_skip,
+        self._close_button = ctk.CTkButton(
+            self._buttons, text="Закрыть",
+            command=self._on_close_attempt,
             width=160, height=40,
             fg_color=("gray75", "gray28"),
             hover_color=("gray65", "gray35"),
         )
-        self._skip_button.pack(side="left")
-
-        self._install_button = ctk.CTkButton(
-            buttons, text="⬇  Установить",
-            command=self._on_install,
-            width=220, height=40,
+        self._retry_button = ctk.CTkButton(
+            self._buttons, text="Повторить",
+            command=self._start_install,
+            width=200, height=40,
             font=ctk.CTkFont(size=13, weight="bold"),
         )
-        self._install_button.pack(side="right")
 
-    # --- Обработчики кнопок --------------------------------------------
+    # --- Управление ----------------------------------------------------
 
     def _on_close_attempt(self) -> None:
-        if self._lock_actions:
-            return
-        self._on_skip()
-
-    def _on_skip(self) -> None:
         if self._lock_actions:
             return
         self.cfg.set("first_launch_done", True)
         self.cfg.save()
         self.grab_release()
         self.destroy()
-        # Если что-то уже скачалось — нужно перезапустить,
-        # чтобы список стратегий в главном окне подтянулся свежий.
-        if self._any_success:
-            restart_app(delay_seconds=2)
 
-    def _on_install(self) -> None:
+    def _start_install(self) -> None:
         if self._lock_actions:
             return
 
         self._lock_actions = True
-        self._install_button.configure(state="disabled")
-        self._skip_button.configure(state="disabled")
+        self._retry_button.pack_forget()
+        self._close_button.pack_forget()
         self._progress.set(0)
+        self._status_label.configure(text="Подготовка…", text_color=("gray45", "gray60"))
+
+        for step in STEPS:
+            self._step_statuses[step.key] = "pending"
+            self._step_widgets[step.key].configure(text="○", text_color=STATUS_NEUTRAL)
 
         threading.Thread(target=self._run_all_steps, daemon=True).start()
 
@@ -270,21 +217,13 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         for i, step in enumerate(STEPS):
             self.after(0, lambda s=step: self._mark_running(s.key))
 
-            # Пропускаем шаг с конфигами, если галочка снята
-            if step.key == "install_creator" and not self.use_creator_var.get():
-                self.after(0, lambda s=step: self._mark_done(s.key, True, "Пропущено"))
-                continue
-
             ok, message = self._execute_step(step.key)
 
             self.after(0, lambda s=step, ok=ok, msg=message:
                        self._mark_done(s.key, ok, msg))
 
-            if ok:
-                self._any_success = True
-
             if not ok:
-                self.after(0, lambda s=step, msg=message: self._show_error(s, msg))
+                self.after(0, lambda msg=message: self._show_error(msg))
                 return
 
             progress = (i + 1) / total
@@ -296,8 +235,8 @@ class FirstLaunchDialog(ctk.CTkToplevel):
         try:
             if key == "download_zapret":
                 return self._step_download_zapret()
-            if key == "install_creator":
-                res = self.zapret.install_creator_configs()
+            if key == "install_config":
+                res = self.zapret.install_bundled_config()
                 return (res.ok, res.message)
             if key == "download_tgproxy":
                 return self._step_download_tgproxy()
@@ -306,8 +245,6 @@ class FirstLaunchDialog(ctk.CTkToplevel):
             tb.print_exc()
             return (False, f"Ошибка: {e}")
         return (False, "Неизвестный шаг")
-
-    # --- Реализация шагов ----------------------------------------------
 
     def _step_download_zapret(self) -> tuple[bool, str]:
         if self.zapret.is_installed():
@@ -333,52 +270,37 @@ class FirstLaunchDialog(ctk.CTkToplevel):
             return (False, res.message)
         return (True, res.message)
 
-    # --- Обновление UI из главного потока ------------------------------
+    # --- Обновление UI -------------------------------------------------
 
     def _mark_running(self, key: str) -> None:
         self._step_statuses[key] = "running"
-        icon, title = self._step_widgets[key]
-        icon.configure(text="◔", text_color=STATUS_WARN)
-        self._current_step = key
-        title_text = next((s.title for s in STEPS if s.key == key), key)
-        self._status_label.configure(text=f"Выполняется: {title_text}…")
+        self._step_widgets[key].configure(text="◔", text_color=STATUS_WARN)
+        title = next((s.title for s in STEPS if s.key == key), key)
+        self._status_label.configure(text=f"{title}…")
 
     def _mark_done(self, key: str, ok: bool, message: str) -> None:
         self._step_statuses[key] = "done" if ok else "error"
-        icon, _ = self._step_widgets[key]
         if ok:
-            icon.configure(text="✓", text_color=STATUS_OK)
+            self._step_widgets[key].configure(text="✓", text_color=STATUS_OK)
             self._status_label.configure(text=message)
         else:
-            icon.configure(text="✗", text_color=STATUS_ERROR)
-            self._status_label.configure(text=f"Ошибка: {message}")
+            self._step_widgets[key].configure(text="✗", text_color=STATUS_ERROR)
+            self._status_label.configure(text=f"Ошибка: {message}", text_color=STATUS_ERROR)
 
-    def _show_error(self, step: Step, message: str) -> None:
+    def _show_error(self, message: str) -> None:
         self._lock_actions = False
-        self._install_button.configure(text="↻  Повторить", state="normal")
-        self._skip_button.configure(text="Пропустить", state="normal")
-
-        messagebox.showerror(
-            "Ошибка установки",
-            f"Шаг «{step.title}» не выполнен:\n\n{message}\n\n"
-            f"Нажмите «Повторить», чтобы попробовать снова, "
-            f"или «Пропустить», чтобы продолжить без этого компонента.",
-            parent=self,
-        )
+        self._status_label.configure(text=f"Ошибка: {message}", text_color=STATUS_ERROR)
+        self._retry_button.pack(side="right")
+        self._close_button.pack(side="left")
 
     def _on_success(self) -> None:
         self._progress.set(1.0)
         self._status_label.configure(
-            text="Всё готово! Перезапуск приложения через пару секунд…",
+            text="Готово. Перезапуск приложения…",
             text_color=STATUS_OK,
         )
-
-        self._install_button.pack_forget()
-        self._skip_button.pack_forget()
 
         self.cfg.set("first_launch_done", True)
         self.cfg.save()
 
-        # Перезапуск приложения, чтобы список стратегий в главном окне
-        # сформировался уже с учётом свежескачанных .bat-файлов.
-        self.after(2000, lambda: restart_app(delay_seconds=2))
+        self.after(1800, lambda: restart_app(delay_seconds=2))
