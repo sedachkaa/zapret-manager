@@ -63,6 +63,8 @@ class MainWindow(ctk.CTk):
         # ---- кэш для оптимизации ----
         self._last_zapret_text: str = ""
         self._last_zapret_color: tuple | None = None
+        self._last_zapret_details: str = ""
+        self._last_zapret_version: str = ""
         self._last_tgproxy_text: str = ""
         self._last_tgproxy_color: tuple | None = None
         self._last_tgproxy_details: str = ""
@@ -252,11 +254,11 @@ class MainWindow(ctk.CTk):
     # ============================================================
 
     def _auto_refresh(self) -> None:
-        try:
-            self._refresh_zapret_status()
-            self._refresh_tgproxy_status()
-        except Exception as e:
-            print("[auto_refresh] error:", e)
+        for refresh in (self._refresh_zapret_status, self._refresh_tgproxy_status):
+            try:
+                refresh()
+            except Exception as e:
+                print("[auto_refresh] error:", e)
         self.after(AUTO_REFRESH_MS, self._auto_refresh)
 
     # ============================================================
@@ -268,211 +270,200 @@ class MainWindow(ctk.CTk):
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(4, weight=1)
 
-        status_card = ctk.CTkFrame(tab, corner_radius=10, fg_color=CARD_FG,
-                                    border_width=1, border_color=CARD_BORDER)
-        status_card.grid(row=0, column=0, padx=PAD_SECTION, pady=(PAD_SECTION, 4), sticky="ew")
+        status_card = ctk.CTkFrame(
+            tab, corner_radius=12, fg_color=CARD_FG,
+            border_width=1, border_color=CARD_BORDER)
+        status_card.grid(row=0, column=0, padx=PAD_SECTION,
+                         pady=(PAD_SECTION, 6), sticky="ew")
         status_card.grid_columnconfigure(1, weight=1)
 
         self.zapret_indicator = ctk.CTkLabel(
-            status_card, text="●", font=ctk.CTkFont(size=18),
-            text_color=("gray60", "gray50"))
-        self.zapret_indicator.grid(row=0, column=0, padx=(14, 6), pady=(10, 2), sticky="w")
+            status_card, text="●", width=28,
+            font=ctk.CTkFont(size=22),
+            text_color=STATUS_NEUTRAL)
+        self.zapret_indicator.grid(row=0, column=0, rowspan=2,
+                                   padx=(18, 8), pady=14, sticky="w")
 
         self.zapret_status = ctk.CTkLabel(
-            status_card, text="проверка...", anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"))
-        self.zapret_status.grid(row=0, column=1, padx=(0, 12), pady=(10, 2), sticky="ew")
+            status_card, text="Проверка…", anchor="w",
+            font=ctk.CTkFont(size=18, weight="bold"))
+        self.zapret_status.grid(row=0, column=1, padx=(0, 12),
+                                pady=(14, 0), sticky="ew")
+
+        self.zapret_details = ctk.CTkLabel(
+            status_card, text="", anchor="w",
+            text_color=("gray45", "gray60"),
+            font=ctk.CTkFont(size=11))
+        self.zapret_details.grid(row=1, column=1, padx=(0, 12),
+                                 pady=(0, 14), sticky="ew")
 
         self.zapret_version_label = ctk.CTkLabel(
-            status_card, text="", text_color=("gray45", "gray60"),
-            font=ctk.CTkFont(size=12))
-        self.zapret_version_label.grid(row=0, column=2, padx=(0, 16), pady=(10, 2), sticky="e")
+            status_card, text="", anchor="e",
+            text_color=("gray45", "gray60"),
+            font=ctk.CTkFont(size=12, weight="bold"))
+        self.zapret_version_label.grid(row=0, column=2, padx=(0, 14),
+                                       pady=(14, 0), sticky="e")
 
-        self.zapret_strategy_label = ctk.CTkLabel(
-            status_card, text="", anchor="w", text_color=("gray45", "gray60"),
-            font=ctk.CTkFont(size=11))
-        self.zapret_strategy_label.grid(row=1, column=0, columnspan=3,
-                                         padx=16, pady=(0, 10), sticky="w")
+        ctk.CTkButton(
+            status_card, text="↻  Обновить", command=self._refresh_zapret_status,
+            width=110, height=30, fg_color="transparent",
+            border_width=1, border_color=CARD_BORDER,
+            hover_color=("gray82", "gray24"),
+            text_color=("gray25", "gray85"),
+            font=ctk.CTkFont(size=11)).grid(
+            row=1, column=2, padx=(0, 14), pady=(0, 14), sticky="e")
 
         self.zapret_buttons: list[ctk.CTkButton] = []
 
-        card, body = self._make_card(tab, title="Управление zapret")
-        card.grid(row=1, column=0, padx=PAD_SECTION, pady=4, sticky="ew")
+        action = ctk.CTkFrame(
+            tab, corner_radius=12, fg_color=CARD_FG,
+            border_width=1, border_color=CARD_BORDER)
+        action.grid(row=1, column=0, padx=PAD_SECTION, pady=6, sticky="ew")
+        action.grid_columnconfigure((0, 1, 2), weight=1, uniform="actions")
 
-        row = ctk.CTkFrame(body, fg_color="transparent")
-        row.grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(row, text="Стратегия:", font=ctk.CTkFont(size=12)).grid(
-            row=0, column=0, padx=(0, 8), pady=PAD_BTN, sticky="w")
+        ctk.CTkLabel(
+            action, text="Управление zapret", anchor="w",
+            font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, columnspan=3,
+            padx=PAD_CARD, pady=(PAD_CARD, 2), sticky="ew")
 
-        strategies = [p.stem for p in self.zapret.list_strategies()]
-        last = self.cfg.last_strategy
-        default_strategy = last if (last and last in strategies) else (strategies[0] if strategies else "—")
+        ctk.CTkLabel(
+            action,
+            text="Запуск, остановка, выбор стратегии и диагностика — в service.bat.",
+            anchor="w", text_color=("gray45", "gray60"),
+            font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, columnspan=3,
+            padx=PAD_CARD, pady=(0, 10), sticky="ew")
 
-        self.strategy_var = ctk.StringVar(value=default_strategy)
-        self.strategy_menu = ctk.CTkOptionMenu(
-            row, values=strategies or ["—"], variable=self.strategy_var,
-            width=200, command=self._on_strategy_changed)
-        self.strategy_menu.grid(row=0, column=1, padx=(0, 12), pady=PAD_BTN, sticky="w")
+        primary = ctk.CTkButton(
+            action, text="⚙  Открыть service.bat",
+            command=self._on_zapret_open_service_bat,
+            height=54, corner_radius=10,
+            font=ctk.CTkFont(size=14, weight="bold"))
+        primary.grid(row=2, column=0, padx=(PAD_CARD, 6),
+                     pady=(0, PAD_CARD), sticky="nsew")
+        self.zapret_buttons.append(primary)
 
-        for i, (label, cmd) in enumerate([
-            ("▶  Запустить", self._on_zapret_start),
-            ("⏹  Остановить", self._on_zapret_stop),
-            ("⟳  Перезапустить", self._on_zapret_restart),
-        ]):
-            btn = ctk.CTkButton(row, text=label, command=cmd, width=140, height=34,
-                                 font=ctk.CTkFont(size=12, weight="bold"))
-            btn.grid(row=0, column=i + 2, padx=4, pady=PAD_BTN, sticky="w")
+        for col, (label, cmd) in enumerate([
+            ("📁  Папка zapret", self._on_zapret_open_folder),
+            ("📁  Папка lists", self._on_zapret_open_lists),
+        ], start=1):
+            btn = ctk.CTkButton(
+                action, text=label, command=cmd,
+                height=54, corner_radius=10,
+                fg_color=TILE_FG, hover_color=("gray78", "gray27"),
+                text_color=("gray15", "gray90"),
+                border_width=1, border_color=CARD_BORDER,
+                font=ctk.CTkFont(size=12, weight="bold"))
+            padx = ((6, PAD_CARD) if col == 2 else (6, 6))
+            btn.grid(row=2, column=col, padx=padx,
+                     pady=(0, PAD_CARD), sticky="nsew")
             self.zapret_buttons.append(btn)
 
-        card, body = self._make_card(tab, title="service.bat и папки")
-        card.grid(row=2, column=0, padx=PAD_SECTION, pady=4, sticky="ew")
-
-        row = ctk.CTkFrame(body, fg_color="transparent")
-        row.grid(row=0, column=0, sticky="ew")
-
-        btn = ctk.CTkButton(
-            row, text="⚙  Открыть service.bat", command=self._on_zapret_open_service_bat,
-            width=240, height=38, font=ctk.CTkFont(size=13, weight="bold"))
-        btn.grid(row=0, column=0, padx=4, pady=PAD_BTN, sticky="w")
-        self.zapret_buttons.append(btn)
-
-        for i, (label, cmd) in enumerate([
-            ("📁 Папка zapret", self._on_zapret_open_folder),
-            ("📁 Папка lists", self._on_zapret_open_lists),
-        ]):
-            btn = ctk.CTkButton(row, text=label, command=cmd, width=190, height=38)
-            btn.grid(row=0, column=i + 1, padx=4, pady=PAD_BTN, sticky="w")
-            self.zapret_buttons.append(btn)
-
-        ctk.CTkLabel(tab, text="Журнал:", anchor="w",
+        ctk.CTkLabel(tab, text="Журнал", anchor="w",
                      font=ctk.CTkFont(size=12, weight="bold")).grid(
-            row=3, column=0, padx=PAD_SECTION + 6, pady=(6, 0), sticky="w")
-        self.zapret_log = ctk.CTkTextbox(tab, wrap="word")
-        self.zapret_log.grid(row=4, column=0, padx=PAD_SECTION, pady=(4, PAD_SECTION), sticky="nsew")
-
-    def _on_strategy_changed(self, value: str) -> None:
-        if not value or value == "—":
-            return
-        self.cfg.set("last_strategy", value)
-        self.cfg.save()
-        self.set_status(f"Стратегия сохранена: {value}")
-
-    def _refresh_strategies_menu(self) -> None:
-        try:
-            strategies = [p.stem for p in self.zapret.list_strategies()]
-            current = self.strategy_var.get()
-
-            self.strategy_menu.configure(values=strategies or ["—"])
-
-            if current not in strategies:
-                last = self.cfg.last_strategy
-                if last and last in strategies:
-                    self.strategy_var.set(last)
-                else:
-                    self.strategy_var.set(strategies[0] if strategies else "—")
-        except Exception as e:
-            print(f"[gui] не удалось обновить список стратегий: {e}")
+            row=3, column=0, padx=PAD_SECTION + 6, pady=(8, 0), sticky="w")
+        self.zapret_log = ctk.CTkTextbox(tab, wrap="word", corner_radius=10)
+        self.zapret_log.grid(row=4, column=0, padx=PAD_SECTION,
+                             pady=(4, PAD_SECTION), sticky="nsew")
 
     def _refresh_zapret_status(self) -> None:
-        installed = self.zapret.is_installed()
-        service_running = self.zapret.is_service_running()
-        our_process = self.zapret.is_our_process()
-        winws_running = self.zapret.is_winws_running()
+        try:
+            installed = self.zapret.is_installed()
+            service_installed = self.zapret.is_service_installed()
+            service_running = self.zapret.is_service_running()
+            own_process = self.zapret.is_our_process()
+            winws_pid = self.zapret.get_winws_pid() if installed else None
+            version = self.zapret.get_local_version() if installed else ""
+            strategy = (self.zapret.get_active_strategy_name()
+                        if (installed or service_installed) else "")
+        except Exception as e:
+            self._show_zapret_error(f"Не удалось проверить статус: {e}")
+            return
 
         if service_running:
             text, color = "Служба zapret работает", STATUS_OK
-        elif our_process:
-            pid = self.zapret.get_winws_pid()
-            text = f"Standalone запущен (PID {pid})"
-            color = STATUS_OK
-        elif winws_running:
-            pid = self.zapret.get_winws_pid()
-            text = f"winws.exe запущен внешне (PID {pid})"
+        elif winws_pid:
+            if own_process:
+                text = f"zapret запущен (PID {winws_pid})"
+            else:
+                text = f"winws.exe запущен (PID {winws_pid})"
             color = STATUS_OK
         elif not installed:
             text, color = "Не установлен", STATUS_WARN
+        elif service_installed:
+            text, color = "Служба остановлена", STATUS_NEUTRAL
         else:
             text, color = "Не активен", STATUS_NEUTRAL
 
-        if text != self._last_zapret_text or color != self._last_zapret_color:
+        details: list[str] = []
+        if strategy:
+            details.append(f"Стратегия: {strategy}")
+        elif installed:
+            details.append("Стратегия не определена")
+        if not installed:
+            details.append("Компоненты не найдены — откройте «Обновления»")
+        details_text = "  ·  ".join(details) if details else "Готово к работе"
+        version_text = (f"v{version}" if version and version != "?"
+                        else ("v?" if installed else ""))
+
+        state_changed = (text != self._last_zapret_text
+                         or color != self._last_zapret_color)
+        details_changed = details_text != self._last_zapret_details
+        if state_changed:
             self._last_zapret_text = text
             self._last_zapret_color = color
             self.zapret_status.configure(text=text, text_color=color)
             self.zapret_indicator.configure(text_color=color)
+        if details_changed:
+            self._last_zapret_details = details_text
+            self.zapret_details.configure(text=details_text)
+        if version_text != self._last_zapret_version:
+            self._last_zapret_version = version_text
+            self.zapret_version_label.configure(text=version_text)
+        if state_changed or details_changed:
+            self.log("zapret", f"Статус: {text} — {details_text}")
 
-        ver = f"v{self.zapret.get_local_version()}" if installed else ""
-        if self.zapret_version_label.cget("text") != ver:
-            self.zapret_version_label.configure(text=ver)
-
-        strat = self.zapret.get_active_strategy_name()
-        new_strat_text = f"Активная стратегия: {strat}" if (strat and (service_running or winws_running)) else ""
-        if self.zapret_strategy_label.cget("text") != new_strat_text:
-            self.zapret_strategy_label.configure(text=new_strat_text)
-
-    def _on_zapret_start(self) -> None:
-        name = self.strategy_var.get()
-        strategy_bat = self.zapret.zapret_dir / f"{name}.bat"
-        if not strategy_bat.exists():
-            self.log("zapret", f"✗ файл стратегии не найден: {strategy_bat}")
-            return
-        if self.zapret.is_service_running():
-            self.log("zapret", f"→ Служба уже запущена ({self.zapret.get_active_strategy_name() or '?'})")
-            self.set_status("Уже запущено")
-            return
-        self._run_zapret_op(f"Запуск {name}",
-                            lambda: self.zapret.start_smart(strategy_bat),
-                            with_details=True)
-
-    def _on_zapret_stop(self) -> None:
-        if not self.zapret.is_active():
-            self.log("zapret", "→ zapret не запущен")
-            return
-        self._run_zapret_op("Остановка zapret", lambda: self.zapret.stop_smart(), with_details=True)
-
-    def _on_zapret_restart(self) -> None:
-        name = self.strategy_var.get()
-        strategy_bat = self.zapret.zapret_dir / f"{name}.bat"
-        if not strategy_bat.exists():
-            self.log("zapret", f"✗ файл стратегии не найден: {strategy_bat}")
-            return
-        self._run_zapret_op(f"Перезапуск {name}",
-                            lambda: self.zapret.restart_smart(strategy_bat), with_details=True)
+    def _show_zapret_error(self, message: str) -> None:
+        was_error = self._last_zapret_text == "Ошибка проверки статуса"
+        self._last_zapret_text = "Ошибка проверки статуса"
+        self._last_zapret_color = STATUS_ERROR
+        self._last_zapret_details = message
+        self._last_zapret_version = ""
+        self.zapret_status.configure(text="Ошибка проверки статуса", text_color=STATUS_ERROR)
+        self.zapret_indicator.configure(text_color=STATUS_ERROR)
+        self.zapret_details.configure(text=message)
+        self.zapret_version_label.configure(text="")
+        if not was_error:
+            self.log("zapret", f"✗ {message}")
 
     def _on_zapret_open_folder(self) -> None:
         if self.zapret.open_folder():
             self.log("zapret", "→ Открыта папка zapret/")
+            self.set_status("Открыта папка zapret")
         else:
             self.log("zapret", "✗ Папка zapret/ не найдена")
+            self.set_status("Папка zapret не найдена")
 
     def _on_zapret_open_lists(self) -> None:
         if self.zapret.open_lists_folder():
             self.log("zapret", "→ Открыта папка lists/")
+            self.set_status("Открыта папка lists")
         else:
             self.log("zapret", "✗ Папка lists/ не найдена")
+            self.set_status("Папка lists не найдена")
 
     def _on_zapret_open_service_bat(self) -> None:
         res = self.zapret.open_service_bat()
         self.log("zapret", f"→ {res.summary()}")
-
-    def _run_zapret_op(self, title: str, work: Callable,
-                       with_details: bool = False,
-                       on_done_extra: Callable | None = None) -> None:
-        self._run_async(title, work=work,
-                        on_done=lambda res: self._after_zapret_op(res, with_details, on_done_extra),
-                        tab="zapret")
-
-    def _after_zapret_op(self, res, with_details: bool, on_done_extra: Callable | None) -> None:
-        self.log("zapret", f"→ {res.summary()}")
-        if with_details and getattr(res, "details", ""):
+        if res.details:
             self.log("zapret", res.details)
-        if on_done_extra:
-            try:
-                on_done_extra()
-            except Exception as e:
-                self.log("zapret", f"✗ Ошибка пост-обработки: {e}")
-        self._refresh_zapret_status()
-        self._refresh_strategies_menu()
-        self.set_status("Готово")
+        if res.ok:
+            self.set_status("service.bat открыт — выберите действие в консоли")
+            for delay in (800, 2500, 6000, 12000):
+                self.after(delay, self._refresh_zapret_status)
+        else:
+            self.set_status(f"Не удалось открыть service.bat: {res.message}")
 
     # ============================================================
     #  ВКЛАДКА TELEGRAM PROXY
@@ -836,7 +827,6 @@ class MainWindow(ctk.CTk):
             self.update_cards["zapret"]["status_label"].configure(
                 text="○  Обновлено, требуется переустановка службы",
                 text_color=STATUS_WARN)
-            self._refresh_strategies_menu()
         elif key == "tgproxy":
             self.tgproxy.clear_version_cache()
             new_ver = self.tgproxy.get_version() or "—"
@@ -888,7 +878,6 @@ class MainWindow(ctk.CTk):
         self.tgproxy.clear_version_cache()
         self.update_cards["tgproxy"]["current_label"].configure(
             text=self.tgproxy.get_version() or "—")
-        self._refresh_strategies_menu()
         self.set_status("Готово")
 
     # ============================================================
@@ -933,8 +922,6 @@ class MainWindow(ctk.CTk):
         try:
             res = self.zapret.install_bundled_config()
             self.log("zapret", f"→ {res.summary()}")
-            if res.ok:
-                self._refresh_strategies_menu()
             self.set_status("Рабочий конфиг обновлён")
         except Exception as e:
             self.log("zapret", f"✗ Ошибка установки конфига: {e}")
