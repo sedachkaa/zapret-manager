@@ -18,7 +18,7 @@ import customtkinter as ctk
 from app.core import autostart, self_updater, updater
 from app.core.config import APP_DATA_DIR, APP_INSTALL_DIR, Config
 from app.core.tgproxy_manager import TgProxyManager
-from app.core.zapret_manager import ZapretManager
+from app.core.zapret_manager import BUNDLED_CONFIG_VERSION, ZapretManager
 from app.version import __version__ as APP_VERSION
 
 
@@ -916,7 +916,7 @@ class MainWindow(ctk.CTk):
             return
         if not self.zapret.is_installed():
             return
-        if self.cfg.get("last_creator_config_version") == APP_VERSION:
+        if self.cfg.get("last_creator_config_version") == BUNDLED_CONFIG_VERSION:
             return
 
         try:

@@ -217,5 +217,5 @@ if __name__ == "__main__":
     print("Last strategy     :", cfg.last_strategy or "(не задана)")
     print("first_launch_done :", cfg.get("first_launch_done"))
     print("last_creator_ver  :", cfg.get("last_creator_config_version"))
-    print("Asset (list)      :", get_asset_path("list-general.txt"))
-    print("Asset exists      :", get_asset_path("list-general.txt").exists())
+    print("Asset (config)    :", get_asset_path("creator_configs"))
+    print("Asset exists      :", get_asset_path("creator_configs").exists())

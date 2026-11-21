@@ -26,6 +26,11 @@ GITHUB_RELEASE_URL = "https://github.com/Flowseal/zapret-discord-youtube/release
 SERVICE_NAME = "zapret"
 USER_AGENT = "zapret-manager/1.0"
 
+# Версия встроенного рабочего конфига (app/assets/creator_configs).
+# Меняется при обновлении конфига, чтобы он переустановился у всех,
+# даже если версия самой обёртки не изменилась.
+BUNDLED_CONFIG_VERSION = "0.3.0-1.10.4"
+
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
@@ -1135,51 +1140,8 @@ class ZapretManager:
         if changed:
             self.cfg.set("exclude_from_update", excludes)
 
-        from app.version import __version__
-        self.cfg.set("last_creator_config_version", __version__)
+        self.cfg.set("last_creator_config_version", BUNDLED_CONFIG_VERSION)
         self.cfg.save()
 
         extra = f", убрано лишних стратегий: {len(removed)}" if removed else ""
         return ZapretResult("install_config", True, f"Установлено: {', '.join(copied)}{extra}")
-
-    def get_bundled_list_info(self, asset_name: str = "list-general.txt") -> dict[str, int]:
-        source = get_asset_path(asset_name)
-        if not source.exists():
-            return {"exists": 0, "lines": 0, "size": 0}
-        try:
-            data = source.read_text(encoding="utf-8", errors="replace")
-            non_empty = sum(1 for line in data.splitlines() if line.strip() and not line.strip().startswith("#"))
-            return {"exists": 1, "lines": non_empty, "size": source.stat().st_size}
-        except OSError:
-            return {"exists": 0, "lines": 0, "size": 0}
-
-    def open_bundled_list(self, asset_name: str = "list-general.txt") -> bool:
-        source = get_asset_path(asset_name)
-        if not source.exists():
-            return False
-        try:
-            os.startfile(str(source))
-            return True
-        except OSError:
-            return False
-
-    def install_bundled_list(self, asset_name: str = "list-general.txt") -> ZapretResult:
-        source = get_asset_path(asset_name)
-        if not source.exists():
-            return ZapretResult("install_list", False, f"встроенный список не найден: {asset_name}", "Проверьте, что в приложении есть app/assets/list-general.txt")
-
-        target = self.lists_dir / "list-general.txt"
-        backup = self.lists_dir / "list-general.txt.backup"
-
-        try:
-            self.lists_dir.mkdir(parents=True, exist_ok=True)
-            backup_msg = ""
-            if target.exists():
-                shutil.copy2(target, backup)
-                backup_msg = f" Текущий список сохранён в {backup.name}."
-            shutil.copy2(source, target)
-            data = target.read_text(encoding="utf-8", errors="replace")
-            lines = sum(1 for line in data.splitlines() if line.strip() and not line.strip().startswith("#"))
-            return ZapretResult("install_list", True, f"установлен фирменный список ({lines} доменов).{backup_msg}")
-        except OSError as e:
-            return ZapretResult("install_list", False, "ошибка копирования", str(e))

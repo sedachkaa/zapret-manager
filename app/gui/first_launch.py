@@ -252,13 +252,21 @@ class FirstLaunchDialog(ctk.CTkToplevel):
 
         release = updater.check_zapret_update(self.cfg)
         if release is None:
-            return (False, "Не удалось получить информацию о релизе zapret")
+            return (
+                False,
+                "Не удалось получить релиз zapret с GitHub. "
+                "Проверьте подключение к интернету и нажмите «Повторить».",
+            )
 
-        written, skipped = updater.apply_release(
-            release,
-            target_dir=self.zapret.zapret_dir,
-            excludes=self.cfg.exclude_from_update,
-        )
+        try:
+            written, skipped = updater.apply_release(
+                release,
+                target_dir=self.zapret.zapret_dir,
+                excludes=self.cfg.exclude_from_update,
+            )
+        except Exception as e:
+            return (False, f"Не удалось скачать или распаковать zapret: {e}")
+
         return (True, f"zapret {release.tag} — скачано {written} файлов")
 
     def _step_download_tgproxy(self) -> tuple[bool, str]:

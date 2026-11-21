@@ -52,18 +52,36 @@ jobs:
           if (-not (Test-Path $iss)) { throw "ISCC.exe not found" }
           & $iss "installer\setup.iss"
 
-      - name: List build outputs
+      - name: Create portable ZIP and checksums
         shell: pwsh
         run: |
-          Write-Host "--- dist ---"
-          Get-ChildItem dist | Format-Table Name, Length
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $zip = "dist\ZapretManager-$version-portable.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "dist\ZapretManager\*" -DestinationPath $zip -Force
+
+          $files = @(
+            Get-ChildItem dist -Filter "ZapretManager-Setup-*.exe"
+            Get-Item $zip
+          )
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($f.Name)"
+          }
+          $lines | Set-Content -Path "dist\SHA256SUMS.txt" -Encoding ascii
+
+          Write-Host "--- release files ---"
+          $files | Select-Object Name, Length | Format-Table
+          Get-Content "dist\SHA256SUMS.txt"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/ZapretManager-Setup-*.exe
-            dist/ZapretManager/*.exe
+            dist/ZapretManager-*-portable.zip
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
           generate_release_notes: true
           draft: false
           prerelease: false

@@ -30,6 +30,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -42,6 +43,7 @@ from app.core.config import PROJECT_ROOT, Config
 
 
 GITHUB_API = "https://api.github.com"
+GITHUB_WEB = "https://github.com"
 USER_AGENT = "zapret-manager-updater/1.0"
 
 # Имя переменной окружения, в которой ищется токен.
@@ -183,22 +185,116 @@ def _pick_asset(assets: list[dict]) -> tuple[str | None, str | None, str | None]
     return (None, None, None)
 
 
+# --- Резервный путь без GitHub API ---------------------------------------
+
+def _resolve_latest_tag(owner_repo: str) -> str | None:
+    """
+    Определяет тег последнего релиза без GitHub API — по редиректу
+    https://github.com/{owner}/{repo}/releases/latest.
+
+    Нужен, когда API вернул 403 (лимит 60 запросов/час на IP) или
+    временно недоступен.
+    """
+    url = f"{GITHUB_WEB}/{owner_repo}/releases/latest"
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            final_url = resp.geturl()
+    except Exception as e:
+        print(f"[updater] не удалось определить последний тег {owner_repo}: {e}")
+        return None
+
+    marker = "/releases/tag/"
+    if marker not in final_url:
+        return None
+    return final_url.split(marker, 1)[1].split("?", 1)[0].strip("/") or None
+
+
+def _url_exists(url: str) -> bool:
+    """True, если HEAD-запрос к URL успешен (файл существует)."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= int(getattr(resp, "status", 200)) < 400
+    except urllib.error.HTTPError as e:
+        # Некоторые CDN отвечают 3xx на HEAD — это тоже «файл есть».
+        return e.code in (301, 302, 303, 307, 308)
+    except Exception as e:
+        print(f"[updater] HEAD {url} failed: {e}")
+        return False
+
+
+def _fallback_release(
+    owner_repo: str,
+    assets: list[tuple[str, str]],
+) -> ReleaseInfo | None:
+    """
+    Собирает ReleaseInfo без API по известным шаблонам имён ассетов.
+    assets — список (шаблон_имени, тип), например:
+        ("zapret-discord-youtube-{tag_no_v}.zip", "zip")
+    """
+    tag = _resolve_latest_tag(owner_repo)
+    if not tag:
+        return None
+
+    version = _normalize_version(tag)
+    if version is None:
+        return None
+
+    tag_no_v = tag.lstrip("vV")
+    for template, asset_type in assets:
+        try:
+            asset_name = template.format(
+                tag=tag, tag_no_v=tag_no_v, version=str(version)
+            )
+        except (KeyError, IndexError, ValueError):
+            continue
+
+        asset_url = f"{GITHUB_WEB}/{owner_repo}/releases/download/{tag}/{asset_name}"
+        if not _url_exists(asset_url):
+            continue
+
+        print(f"[updater] fallback без API: {owner_repo} {tag} -> {asset_name}")
+        return ReleaseInfo(
+            tag=tag,
+            version=version,
+            name=tag,
+            asset_url=asset_url,
+            asset_name=asset_name,
+            asset_type=asset_type,
+            html_url=f"{GITHUB_WEB}/{owner_repo}/releases/tag/{tag}",
+        )
+
+    return None
+
+
 # --- Публичные функции --------------------------------------------------
 
-def fetch_latest_release(owner_repo: str, *, include_prerelease: bool = False) -> ReleaseInfo | None:
+def fetch_latest_release(
+    owner_repo: str,
+    *,
+    include_prerelease: bool = False,
+    fallback_assets: list[tuple[str, str]] | None = None,
+) -> ReleaseInfo | None:
     """
     Возвращает информацию о последнем релизе репозитория {owner}/{name}.
-    При 403 (rate limit) и 404 (не найдено) — None, без исключения.
+    При 403 (rate limit), 404 и сетевых ошибках пробует резервный путь
+    без GitHub API, если передан fallback_assets.
     """
     url = f"{GITHUB_API}/repos/{owner_repo}/releases/latest"
     if include_prerelease:
         url = f"{GITHUB_API}/repos/{owner_repo}/releases"
 
+    def _fallback() -> ReleaseInfo | None:
+        if include_prerelease or not fallback_assets:
+            return None
+        return _fallback_release(owner_repo, fallback_assets)
+
     try:
         data = _http_get_json(url)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return None
+            return _fallback()
         if e.code == 403:
             has_token = has_github_token()
             hint = (
@@ -208,25 +304,29 @@ def fetch_latest_release(owner_repo: str, *, include_prerelease: bool = False) -
                 "Токен указан, но лимит исчерпан — проверь токен."
             )
             print(f"[updater] GitHub rate limit для {owner_repo}. {hint}")
-            return None
+            return _fallback()
         raise
     except Exception as e:
         print(f"[updater] ошибка запроса к GitHub для {owner_repo}: {e}")
-        return None
+        return _fallback()
 
     if include_prerelease:
         if not isinstance(data, list) or not data:
-            return None
+            return _fallback()
         data = data[0]
     elif isinstance(data, dict) and data.get("message") == "Not Found":
-        return None
+        return _fallback()
 
     tag = str(data.get("tag_name", "")).strip()
     version = _normalize_version(tag)
     if version is None:
-        return None
+        return _fallback()
 
     asset_url, asset_name, asset_type = _pick_asset(data.get("assets", []))
+    if not asset_url:
+        fb = _fallback()
+        if fb:
+            return fb
 
     return ReleaseInfo(
         tag=tag,
@@ -246,11 +346,7 @@ def is_newer(remote: ReleaseInfo, current_version: str) -> bool:
     return remote.version > cur
 
 
-def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
-    """
-    Скачивает файл по URL в dest.
-    progress_cb(percent: float) — необязательный callback для прогресса.
-    """
+def _download_once(url: str, dest: Path, *, progress_cb=None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     headers = {"User-Agent": USER_AGENT}
@@ -276,6 +372,39 @@ def download_file(url: str, dest: Path, *, progress_cb=None) -> Path:
                     except Exception:
                         pass
     return dest
+
+
+def download_file(
+    url: str,
+    dest: Path,
+    *,
+    progress_cb=None,
+    attempts: int = 3,
+) -> Path:
+    """
+    Скачивает файл по URL в dest с повторами.
+    progress_cb(percent: float) — необязательный callback для прогресса.
+    """
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            _download_once(url, dest, progress_cb=progress_cb)
+            if not dest.exists() or dest.stat().st_size == 0:
+                raise RuntimeError("скачанный файл пуст")
+            return dest
+        except Exception as e:
+            last_error = e
+            print(f"[updater] загрузка не удалась (попытка {attempt}/{attempts}): {e}")
+            try:
+                if dest.exists():
+                    dest.unlink()
+            except OSError:
+                pass
+            if attempt < attempts:
+                time.sleep(1.5 * attempt)
+
+    raise last_error or RuntimeError("не удалось скачать файл")
 
 
 def _is_excluded(rel_from_root: str, excludes: list[str]) -> bool:
@@ -362,6 +491,24 @@ def extract_zip_with_exclusions(
     return written, skipped
 
 
+def _validate_asset(path: Path, asset_type: str) -> None:
+    """Базовая проверка целостности скачанного ассета."""
+    if asset_type == "zip":
+        try:
+            with zipfile.ZipFile(path) as z:
+                bad = z.testzip()
+        except zipfile.BadZipFile as e:
+            raise RuntimeError(f"скачанный zip повреждён: {e}") from e
+        if bad:
+            raise RuntimeError(f"скачанный zip повреждён: {bad}")
+        return
+
+    if asset_type in ("installer", "exe"):
+        with path.open("rb") as f:
+            if f.read(2) != b"MZ":
+                raise RuntimeError("скачанный exe повреждён (нет MZ-заголовка)")
+
+
 def apply_release(
     release: ReleaseInfo,
     target_dir: Path,
@@ -376,6 +523,7 @@ def apply_release(
         tmp_path = Path(tmp)
         downloaded = tmp_path / release.asset_name
         download_file(release.asset_url, downloaded, progress_cb=progress_cb)
+        _validate_asset(downloaded, release.asset_type or "")
 
         if release.asset_type == "zip":
             return extract_zip_with_exclusions(
@@ -393,18 +541,27 @@ def apply_release(
 def check_wrapper_update(current_version: str, cfg: Config) -> ReleaseInfo | None:
     if not cfg.github_repo:
         return None
-    release = fetch_latest_release(cfg.github_repo)
+    release = fetch_latest_release(
+        cfg.github_repo,
+        fallback_assets=[("ZapretManager-Setup-{version}.exe", "installer")],
+    )
     if release and is_newer(release, current_version):
         return release
     return None
 
 
 def check_zapret_update(cfg: Config) -> ReleaseInfo | None:
-    return fetch_latest_release("Flowseal/zapret-discord-youtube")
+    return fetch_latest_release(
+        "Flowseal/zapret-discord-youtube",
+        fallback_assets=[("zapret-discord-youtube-{tag_no_v}.zip", "zip")],
+    )
 
 
 def check_tgproxy_update(cfg: Config) -> ReleaseInfo | None:
-    return fetch_latest_release("Flowseal/tg-ws-proxy")
+    return fetch_latest_release(
+        "Flowseal/tg-ws-proxy",
+        fallback_assets=[("TgWsProxy_windows.exe", "exe")],
+    )
 
 
 # --- Быстрый тест --------------------------------------------------------
